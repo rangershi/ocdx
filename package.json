@@ -37,7 +37,6 @@
     "clean": "rm -rf dist",
     "build": "tsc",
     "prepack": "pnpm run clean && pnpm run build",
-    "prepare": "pnpm run build",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
