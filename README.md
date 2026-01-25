@@ -1,6 +1,6 @@
 # OCDX OpenCode Plugin
 
-这是一个可安装的 OpenCode 插件（npm 包名：`opencode-hello-world`），提供两个主要 slash 命令：
+这是一个可安装的 OpenCode 插件（npm 包名：`ocdx`），提供两个主要 slash 命令：
 
 - `/pr-review-loop`：多模型 PR Review + 自动修复 loop
 - `/ocdx`：从项目内 `.opencode/skills` 选择并按模型分层执行 SKILL.md
@@ -21,7 +21,7 @@ README 分两部分：
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-hello-world"]
+  "plugin": ["ocdx"]
 }
 ```
 
@@ -29,7 +29,7 @@ README 分两部分：
 
 ### 2) 配置 OCDX（必需）
 
-在项目根目录创建 `.opencode/ocdx.json`（参考：`docs/CONFIGURATION.md`）：
+在项目根目录创建 `.opencode/ocdx/config.json`（参考：`docs/CONFIGURATION.md`）：
 
 ```json
 {
@@ -62,7 +62,9 @@ PR Review Loop：
 
 ### 4) 添加 project skills（可选）
 
-放到：`.opencode/skills/<name>/SKILL.md`
+放到（项目级）：`.opencode/skills/<name>/SKILL.md`
+
+放到（全局）：`~/.config/opencode/ocdx/skills/<name>/SKILL.md`
 
 ```md
 ---
@@ -76,7 +78,7 @@ model: high
 
 `model` 支持：
 
-- `high|medium|low`：映射到 `.opencode/ocdx.json` 的 `models.*`
+- `high|medium|low`：映射到 `.opencode/ocdx/config.json` 的 `models.*`
 - `provider/model`：直接指定模型
 
 ---

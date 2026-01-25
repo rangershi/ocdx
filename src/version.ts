@@ -1,2 +1,2 @@
 export const VERSION = '0.1.0';
-export const PLUGIN_NAME = 'opencode-hello-world';
+export const PLUGIN_NAME = 'ocdx';

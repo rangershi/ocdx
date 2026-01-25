@@ -1,5 +1,5 @@
 {
-  "name": "opencode-hello-world",
+  "name": "ocdx",
   "version": "0.1.0",
   "description": "A simple hello world OpenCode plugin",
   "license": "MIT",
@@ -23,7 +23,9 @@
     }
   },
   "files": [
+    "@asset",
     "dist",
+    "scripts",
     "src/version.ts",
     "src/prompts",
     "docs/pr-review-loop-reference.md"
@@ -31,11 +33,12 @@
   "keywords": [
     "opencode",
     "plugin",
-    "hello-world"
+    "pr-review"
   ],
   "scripts": {
     "clean": "rm -rf dist",
     "build": "tsc",
+    "postinstall": "node scripts/postinstall.mjs",
     "prepack": "pnpm run clean && pnpm run build",
     "lint": "eslint .",
     "format": "prettier --write .",

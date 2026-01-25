@@ -1,10 +1,11 @@
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { fileURLToPath } from 'url';
 
 /**
  * OCDX configuration schema
- * Loaded from ~/.config/opencode/ocdx.json
+ * Loaded from ~/.config/opencode/ocdx/config.json (preferred)
  */
 export interface OcdxConfig {
   /** Optional model tiers for different cost/quality tradeoffs */
@@ -61,19 +62,45 @@ const EXAMPLE_CONFIG_JSON = `{
   "commentsAnalyzerModel": "anthropic/claude-3-5-sonnet-20241022",
   "prFixModel": "anthropic/claude-3-5-sonnet-20241022",
   "prompts": {
-    "reviewer": "~/.config/opencode/prompts/my-reviewer.md",
-    "commentsAnalyzer": "~/.config/opencode/prompts/my-analyzer.md",
-    "prFix": "~/.config/opencode/prompts/my-fix.md"
+    "reviewer": "~/.config/opencode/ocdx/prompt/reviewer.md",
+    "commentsAnalyzer": "~/.config/opencode/ocdx/prompt/comments-analyzer.md",
+    "prFix": "~/.config/opencode/ocdx/prompt/pr-fix.md"
   }
 }`;
+
+function getConfigHome(): string {
+  if (process.env.XDG_CONFIG_HOME) return process.env.XDG_CONFIG_HOME;
+
+  if (process.platform === 'win32') {
+    if (process.env.APPDATA) return process.env.APPDATA;
+    return path.join(os.homedir(), 'AppData', 'Roaming');
+  }
+
+  return path.join(os.homedir(), '.config');
+}
+
+function bundledDefaultConfigUrl(): URL {
+  const moduleDir = new URL('.', import.meta.url);
+  const pkgRoot = new URL('..', moduleDir); // parent of src/ or dist/
+  return new URL('@asset/config.json', pkgRoot);
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Load and validate OCDX configuration with project-level override support
  *
  * Configuration file search order (first found wins):
- * 1. Project-level: `<projectRoot>/.opencode/ocdx.json`
- * 2. Project-level: `<projectRoot>/ocdx.json`
- * 3. Global-level: `~/.config/opencode/ocdx.json`
+ * 1. Project-level: `<projectRoot>/.opencode/ocdx/config.json` (preferred)
+ * 2. Global-level: `~/.config/opencode/ocdx/config.json`
+ * 3. Bundled defaults: `@asset/config.json` (fallback)
  *
  * Validation rules:
  * - reviewerModels: array of 1-5 non-empty strings
@@ -108,21 +135,31 @@ const EXAMPLE_CONFIG_JSON = `{
 export async function loadOcdxConfigStrict(projectRoot?: string): Promise<OcdxConfig> {
   // 1. Resolve config path with project-level override support
   const cwd = projectRoot || process.cwd();
+  const configHome = getConfigHome();
+
+  const projectConfigDirPath = path.join(cwd, '.opencode', 'ocdx', 'config.json');
+  const globalConfigDirPath = path.join(configHome, 'opencode', 'ocdx', 'config.json');
+
   const configPaths = [
-    path.join(cwd, '.opencode', 'ocdx.json'), // Project-level (OpenCode convention)
-    path.join(cwd, 'ocdx.json'), // Project-level (root)
-    path.join(os.homedir(), '.config', 'opencode', 'ocdx.json'), // Global fallback
+    projectConfigDirPath, // Project-level (preferred)
+    globalConfigDirPath, // Global-level (preferred)
   ];
 
   let configPath: string | null = null;
   for (const candidatePath of configPaths) {
-    try {
-      await fs.access(candidatePath);
+    if (await fileExists(candidatePath)) {
       configPath = candidatePath;
       break;
+    }
+  }
+
+  // Bundled defaults fallback (works even if postinstall was skipped)
+  if (!configPath) {
+    try {
+      // If readFile fails, it will be handled below.
+      configPath = fileURLToPath(bundledDefaultConfigUrl());
     } catch {
-      // File doesn't exist, try next candidate
-      continue;
+      // ignore
     }
   }
 
@@ -131,7 +168,7 @@ export async function loadOcdxConfigStrict(projectRoot?: string): Promise<OcdxCo
     throw new ConfigError(
       'CONFIG_NOT_FOUND',
       `Config file not found in any of these locations:\n  - ${searchedPaths}\n\nPlease create one with the following structure:\n${EXAMPLE_CONFIG_JSON}`,
-      configPaths[0], // Use first candidate for error reporting
+      projectConfigDirPath,
       EXAMPLE_CONFIG_JSON
     );
   }

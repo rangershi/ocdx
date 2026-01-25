@@ -1,4 +1,4 @@
-import { readFile } from 'fs/promises';
+import { access, readFile } from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -73,8 +73,10 @@ export function extractJsonEnvelope(text: string): any | null {
  *
  * Supports:
  * 1. Custom absolute path (if provided and starts with / or ~)
- * 2. Custom relative path (if provided, relative to repo root)
- * 3. Default bundled path (fallback)
+ * 2. Custom relative path (if provided, relative to project root)
+ * 3. Project override: <projectRoot>/.opencode/ocdx/prompt/<name>
+ * 4. User config: ~/.config/opencode/ocdx/prompt/<name> (or XDG_CONFIG_HOME)
+ * 5. Bundled defaults: @asset/prompt/<name> (fallback)
  *
  * @param name - Prompt file name (e.g., "reviewer.md", "comments-analyzer.md")
  * @param customPath - Optional custom path from config (absolute or relative)
@@ -82,40 +84,101 @@ export function extractJsonEnvelope(text: string): any | null {
  * @throws Error if the file does not exist or cannot be read
  *
  * @example
- * // Default bundled prompt
- * const reviewerPrompt = await loadPromptAsset("reviewer.md");
- * // Returns: Full contents of src/prompts/pr-review-loop/reviewer.md
+ * // Default prompt resolution (project override > user config > bundled)
+ * const reviewerPrompt = await loadPromptAsset("reviewer.md", { projectRoot: "/path/to/project" });
  *
  * @example
  * // Custom absolute path with ~ expansion
- * const reviewerPrompt = await loadPromptAsset("reviewer.md", "~/.config/opencode/prompts/my-reviewer.md");
+ * const reviewerPrompt = await loadPromptAsset("reviewer.md", {
+ *   customPath: "~/.config/opencode/ocdx/prompt/reviewer.md",
+ *   projectRoot: "/path/to/project"
+ * });
  *
  * @example
  * // Custom relative path
- * const reviewerPrompt = await loadPromptAsset("reviewer.md", "prompts/custom-reviewer.md");
+ * const reviewerPrompt = await loadPromptAsset("reviewer.md", {
+ *   customPath: "prompts/custom-reviewer.md",
+ *   projectRoot: "/path/to/project"
+ * });
  */
-export async function loadPromptAsset(name: string, customPath?: string): Promise<string> {
-  let resolvedPath: URL;
+function getConfigHome(): string {
+  if (process.env.XDG_CONFIG_HOME) return process.env.XDG_CONFIG_HOME;
+
+  if (process.platform === 'win32') {
+    if (process.env.APPDATA) return process.env.APPDATA;
+    return path.join(os.homedir(), 'AppData', 'Roaming');
+  }
+
+  return path.join(os.homedir(), '.config');
+}
+
+async function exists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function bundledPromptUrl(name: string): URL {
+  return assetUrl(`@asset/prompt/${name}`);
+}
+
+function projectPromptPath(projectRoot: string, name: string): string {
+  return path.join(projectRoot, '.opencode', 'ocdx', 'prompt', name);
+}
+
+function userPromptPath(name: string): string {
+  return path.join(getConfigHome(), 'opencode', 'ocdx', 'prompt', name);
+}
+
+export async function loadPromptAsset(
+  name: string,
+  options?: {
+    customPath?: string;
+    projectRoot?: string;
+  }
+): Promise<string> {
+  const customPath = options?.customPath;
+  const projectRoot = options?.projectRoot;
 
   if (customPath) {
     // Handle ~ expansion
     if (customPath.startsWith('~/')) {
       const homeDir = os.homedir();
       const expandedPath = path.join(homeDir, customPath.slice(2));
-      resolvedPath = new URL(`file://${expandedPath}`);
+      return readFile(expandedPath, 'utf-8');
     }
+
     // Handle absolute path
-    else if (customPath.startsWith('/')) {
-      resolvedPath = new URL(`file://${customPath}`);
+    if (path.isAbsolute(customPath)) {
+      return readFile(customPath, 'utf-8');
     }
-    // Handle relative path (relative to repo root)
-    else {
-      resolvedPath = assetUrl(customPath);
+
+    // Handle relative path (relative to project root)
+    if (!projectRoot) {
+      throw new Error(`Relative prompt path requires projectRoot: '${customPath}'`);
     }
-  } else {
-    // Default: use bundled prompts
-    resolvedPath = assetUrl(`src/prompts/pr-review-loop/${name}`);
+    return readFile(path.join(projectRoot, customPath), 'utf-8');
   }
 
-  return readFile(resolvedPath, 'utf-8');
+  // 1) Project override
+  if (projectRoot) {
+    const candidate = projectPromptPath(projectRoot, name);
+    if (await exists(candidate)) {
+      return readFile(candidate, 'utf-8');
+    }
+  }
+
+  // 2) User config
+  {
+    const candidate = userPromptPath(name);
+    if (await exists(candidate)) {
+      return readFile(candidate, 'utf-8');
+    }
+  }
+
+  // 3) Bundled defaults
+  return readFile(bundledPromptUrl(name), 'utf-8');
 }

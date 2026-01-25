@@ -15,6 +15,7 @@ coverage/
 .sisyphus/
 
 # Optional: Uncomment to ignore project-level OCDX config
+# .opencode/ocdx/config.json
 # .opencode/ocdx.json
 /.idea/
 /.idea

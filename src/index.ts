@@ -14,6 +14,8 @@ import type {
 import { access, readFile, readdir, writeFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
+import os from 'os';
+import path from 'path';
 
 /**
  * Resolve asset file paths (works from both src/ in dev mode and dist/ when compiled)
@@ -36,7 +38,19 @@ type OcdxSkillSummary = {
   description: string;
   path: string;
   model?: string;
+  scope: 'project' | 'global';
 };
+
+function getConfigHome(): string {
+  if (process.env.XDG_CONFIG_HOME) return process.env.XDG_CONFIG_HOME;
+
+  if (process.platform === 'win32') {
+    if (process.env.APPDATA) return process.env.APPDATA;
+    return path.join(os.homedir(), 'AppData', 'Roaming');
+  }
+
+  return path.join(os.homedir(), '.config');
+}
 
 function stripQuotes(value: string): string {
   const trimmed = value.trim();
@@ -98,8 +112,10 @@ async function findProjectRoot(startDir: string): Promise<string> {
   }
 }
 
-async function listOcdxSkills(projectRoot: string): Promise<OcdxSkillSummary[]> {
-  const skillsDir = join(projectRoot, '.opencode', 'skills');
+async function listSkillsInDir(
+  skillsDir: string,
+  scope: OcdxSkillSummary['scope']
+): Promise<OcdxSkillSummary[]> {
   if (!(await exists(skillsDir))) return [];
 
   const entries = await readdir(skillsDir, { withFileTypes: true });
@@ -117,11 +133,28 @@ async function listOcdxSkills(projectRoot: string): Promise<OcdxSkillSummary[]> 
     const model = data.model;
 
     if (!description) continue;
-    skills.push({ name, description, path: skillPath, model });
+    skills.push({ name, description, path: skillPath, model, scope });
   }
 
   skills.sort((a, b) => a.name.localeCompare(b.name));
   return skills;
+}
+
+async function listOcdxSkills(projectRoot: string): Promise<OcdxSkillSummary[]> {
+  const projectSkillsDir = join(projectRoot, '.opencode', 'skills');
+  const globalSkillsDir = join(getConfigHome(), 'opencode', 'ocdx', 'skills');
+
+  const [globalSkills, projectSkills] = await Promise.all([
+    listSkillsInDir(globalSkillsDir, 'global'),
+    listSkillsInDir(projectSkillsDir, 'project'),
+  ]);
+
+  // Project wins on name collision.
+  const byName = new Map<string, OcdxSkillSummary>();
+  for (const s of globalSkills) byName.set(s.name, s);
+  for (const s of projectSkills) byName.set(s.name, s);
+
+  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -134,7 +167,7 @@ async function listOcdxSkills(projectRoot: string): Promise<OcdxSkillSummary[]> 
  * - Structured logging
  */
 
-export const HelloWorldPlugin: OpenCodePlugin = async ({ client, directory, $ }) => {
+export const OcdxPlugin: OpenCodePlugin = async ({ client, directory, $ }) => {
   // Plugin initialization
   // Track session state
   const sessions = new Map<string, { createdAt: Date; toolsExecuted: number }>();
@@ -177,7 +210,8 @@ ${gitStatus}
       }),
 
       ocdx_list_skills: tool({
-        description: 'List project skills from .opencode/skills/*/SKILL.md (OCDX only)',
+        description:
+          'List OCDX skills from project .opencode/skills and global ~/.config/opencode/ocdx/skills',
         args: {
           query: tool.schema
             .string()
@@ -208,7 +242,10 @@ ${gitStatus}
           return JSON.stringify(
             {
               projectRoot,
-              skillsDir: join(projectRoot, '.opencode', 'skills'),
+              skillsDirs: {
+                project: join(projectRoot, '.opencode', 'skills'),
+                global: join(getConfigHome(), 'opencode', 'ocdx', 'skills'),
+              },
               count: skills.length,
               skills,
             },
@@ -220,9 +257,13 @@ ${gitStatus}
 
       ocdx_run_skill: tool({
         description:
-          'Run a project skill from .opencode/skills via a subagent with model tier mapping (high|medium|low)',
+          'Run an OCDX skill from project .opencode/skills or global ~/.config/opencode/ocdx/skills',
         args: {
-          name: tool.schema.string().describe('Skill name (folder name under .opencode/skills)'),
+          name: tool.schema
+            .string()
+            .describe(
+              'Skill name (folder name under .opencode/skills or ~/.config/opencode/ocdx/skills)'
+            ),
           arguments: tool.schema
             .string()
             .optional()
@@ -230,15 +271,30 @@ ${gitStatus}
         },
         async execute(args, _ctx) {
           const projectRoot = await findProjectRoot(directory);
-          const skillPath = join(projectRoot, '.opencode', 'skills', args.name, 'SKILL.md');
+          const projectSkillPath = join(projectRoot, '.opencode', 'skills', args.name, 'SKILL.md');
+          const globalSkillPath = join(
+            getConfigHome(),
+            'opencode',
+            'ocdx',
+            'skills',
+            args.name,
+            'SKILL.md'
+          );
 
-          if (!(await exists(skillPath))) {
+          const skillPath = (await exists(projectSkillPath))
+            ? projectSkillPath
+            : (await exists(globalSkillPath))
+              ? globalSkillPath
+              : null;
+
+          if (!skillPath) {
             return `❌ Skill not found: ${args.name}
 
-Expected path:
-${skillPath}
+Expected paths:
+- ${projectSkillPath}
+- ${globalSkillPath}
 
-Note: ocdx_run_skill only looks for skills under .opencode/skills/<name>/SKILL.md.`;
+Note: skill name maps to <dir>/<name>/SKILL.md.`;
           }
 
           const content = await readFile(skillPath, 'utf-8');
@@ -254,7 +310,7 @@ Note: ocdx_run_skill only looks for skills under .opencode/skills/<name>/SKILL.m
             config = await loadOcdxConfigStrict(projectRoot);
             modelString = config.models?.[selector];
             if (!modelString) {
-              return `❌ Skill model tier '${selector}' is not configured in .opencode/ocdx.json (missing models.${selector}).`;
+              return `❌ Skill model tier '${selector}' is not configured in .opencode/ocdx/config.json (missing models.${selector}).`;
             }
           } else if (selectorRaw.includes('/')) {
             modelString = selectorRaw;
@@ -268,7 +324,7 @@ Note: ocdx_run_skill only looks for skills under .opencode/skills/<name>/SKILL.m
             return `❌ Unable to resolve model for skill '${args.name}'.
 
 Provide either:
-- model: high|medium|low (and configure models.* in .opencode/ocdx.json)
+- model: high|medium|low (and configure models.* in .opencode/ocdx/config.json)
 - model: provider/model`;
           }
 
@@ -323,10 +379,11 @@ Provide either:
         },
 
         async execute(args, _ctx) {
+          const projectRoot = await findProjectRoot(directory);
           // Step 1: Validate config FIRST (before any PR actions)
           let config;
           try {
-            config = await loadOcdxConfigStrict();
+            config = await loadOcdxConfigStrict(projectRoot);
           } catch (error) {
             if (error instanceof ConfigError) {
               return `❌ Configuration Error
@@ -398,7 +455,10 @@ Cannot proceed with PR review loop.`;
               const { providerID, modelID } = parseModelString(reviewerModel);
 
               // Load reviewer prompt
-              const reviewerPromptTemplate = await loadPromptAsset('reviewer.md');
+              const reviewerPromptTemplate = await loadPromptAsset('reviewer.md', {
+                customPath: config.prompts?.reviewer,
+                projectRoot,
+              });
 
               // Construct PR context
               const prContext = `
@@ -455,7 +515,10 @@ ${prInfo.diff}
               const { providerID, modelID } = parseModelString(analyzerModel);
 
               // Load comments analyzer prompt
-              const analyzerPromptTemplate = await loadPromptAsset('comments-analyzer.md');
+              const analyzerPromptTemplate = await loadPromptAsset('comments-analyzer.md', {
+                customPath: config.prompts?.commentsAnalyzer,
+                projectRoot,
+              });
 
               // Get review threads via GraphQL
               const reviewThreadsOutput =
@@ -769,7 +832,10 @@ ${reviewerResults.filter((r) => r.status === 'rejected').length > 0 ? `- Failed:
             const { providerID: fixProviderID, modelID: fixModelID } = parseModelString(fixModel);
 
             // Load pr-fix prompt
-            const fixPromptTemplate = await loadPromptAsset('pr-fix.md');
+            const fixPromptTemplate = await loadPromptAsset('pr-fix.md', {
+              customPath: config.prompts?.prFix,
+              projectRoot,
+            });
 
             const fixContext = `
 ## PR Metadata
@@ -1084,20 +1150,22 @@ Do not do any other work besides calling the tool.`,
       };
 
       const ocdxSkillCommand = {
-        description: 'Run a project SKILL.md from .opencode/skills using tiered model mapping',
+        description: 'Run an OCDX SKILL.md from project/global skills directories',
         template: `You are a command dispatcher for running OCDX skills.
 
 Raw arguments: "$ARGUMENTS"
 
 Goal:
-- Help the user run one of the project skills located under .opencode/skills/<name>/SKILL.md
+ - Help the user run one of the OCDX skills located under:
+   - .opencode/skills/<name>/SKILL.md (project)
+   - ~/.config/opencode/ocdx/skills/<name>/SKILL.md (global)
 - You MUST call tools only; do not do any other work.
 
 Steps:
 1) If $ARGUMENTS is empty: call tool ocdx_list_skills with {}.
 2) If $ARGUMENTS is non-empty: call tool ocdx_list_skills with {"query":"$ARGUMENTS"}.
 3) The tool returns JSON: { count, skills: [{ name, description, model?, path }] }.
-4) If count == 0: explain that skills must be in .opencode/skills/<name>/SKILL.md and stop.
+4) If count == 0: explain that skills must be in .opencode/skills/<name>/SKILL.md (project) or ~/.config/opencode/ocdx/skills/<name>/SKILL.md (global) and stop.
 5) If count == 1: call tool ocdx_run_skill with {"name": skills[0].name} and stop.
 6) If count > 1:
    - Ask the user to choose using the question tool.
@@ -1181,4 +1249,4 @@ Do not do any other work besides calling the tools.`,
 };
 
 // Export as default for OpenCode compatibility
-export default HelloWorldPlugin;
+export default OcdxPlugin;
