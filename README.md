@@ -28,6 +28,7 @@ bun install
 #### 方法 1: 本地文件
 
 将插件文件复制到：
+
 - 项目级别: `.opencode/plugins/hello-world.ts`
 - 全局级别: `~/.config/opencode/plugins/hello-world.ts`
 
@@ -38,10 +39,24 @@ bun install
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    "opencode-hello-world"
-  ]
+  "plugin": ["opencode-hello-world"]
 }
+```
+
+#### 使用 pnpm 安装（推荐）
+
+```bash
+pnpm add opencode-hello-world
+```
+
+如果你还没有发布到 npm，可以先在本仓库目录生成一个安装包，然后在目标项目中安装：
+
+```bash
+# 在本仓库
+pnpm pack
+
+# 在目标项目目录（示例）
+pnpm add ../opencode-hello-world-0.1.0.tgz
 ```
 
 ## 插件功能
@@ -49,15 +64,17 @@ bun install
 ### 自定义工具
 
 #### 1. `hello`
+
 向某人问候
 
 ```typescript
 // 使用示例
-await hello({ name: "World" });
+await hello({ name: 'World' });
 // 返回: "👋 Hello, World! Welcome to OpenCode!"
 ```
 
 #### 2. `check_directory`
+
 检查当前目录信息
 
 ```typescript
@@ -125,9 +142,15 @@ import type { Plugin } from '@opencode-ai/plugin';
 export const HelloWorldPlugin: Plugin = async ({ client, directory, $ }) => {
   // 初始化代码
   return {
-    tool: { /* 工具定义 */ },
-    event: async ({ event }) => { /* 事件处理 */ },
-    config: async (opencodeConfig) => { /* 配置修改 */ },
+    tool: {
+      /* 工具定义 */
+    },
+    event: async ({ event }) => {
+      /* 事件处理 */
+    },
+    config: async (opencodeConfig) => {
+      /* 配置修改 */
+    },
   };
 };
 
@@ -157,7 +180,7 @@ tool: {
 ```typescript
 await client.app.log({
   service: 'plugin-name',
-  level: 'info',  // debug, info, warn, error
+  level: 'info', // debug, info, warn, error
   message: '日志消息',
   extra: { key: 'value' },
 });
