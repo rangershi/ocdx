@@ -2,7 +2,17 @@
   "name": "opencode-hello-world",
   "version": "0.1.0",
   "description": "A simple hello world OpenCode plugin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rangershi/ocdx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rangershi/ocdx/issues"
+  },
+  "homepage": "https://github.com/rangershi/ocdx#readme",
   "type": "module",
+  "packageManager": "pnpm@10.26.1",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -24,13 +34,19 @@
     "hello-world"
   ],
   "scripts": {
+    "clean": "rm -rf dist",
     "build": "tsc",
+    "prepack": "pnpm run clean && pnpm run build",
+    "prepare": "pnpm run build",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.1.15"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.1.15"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
