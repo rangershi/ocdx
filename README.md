@@ -1,40 +1,22 @@
-# OpenCode Hello World Plugin
+# OCDX OpenCode Plugin
 
-一个简单的 OpenCode 插件示例，展示了插件开发的最佳实践。
+这是一个可安装的 OpenCode 插件（npm 包名：`opencode-hello-world`），提供两个主要 slash 命令：
 
-## 功能特性
+- `/pr-review-loop`：多模型 PR Review + 自动修复 loop
+- `/ocdx`：从项目内 `.opencode/skills` 选择并按模型分层执行 SKILL.md
 
-- ✅ 自定义工具注册
-- ✅ 事件监听和处理
-- ✅ 会话状态跟踪
-- ✅ 结构化日志记录
-- ✅ Shell 命令执行
-- ✅ 配置扩展
+README 分两部分：
 
-## 安装
+- 使用者（OpenCode 用户）快速上手
+- 开发者（维护/发布）说明
 
-### 本地开发
+---
 
-```bash
-# 安装依赖
-pnpm install
+## 使用者快速上手（OpenCode 用户）
 
-# 或使用 bun
-bun install
-```
+### 1) 安装插件
 
-### 在 OpenCode 中使用
-
-#### 方法 1: 本地文件
-
-将插件文件复制到：
-
-- 项目级别: `.opencode/plugins/hello-world.ts`
-- 全局级别: `~/.config/opencode/plugins/hello-world.ts`
-
-#### 方法 2: npm 包（发布后）
-
-在 `opencode.json` 中添加：
+在你的项目 `opencode.json` 加上插件：
 
 ```json
 {
@@ -43,176 +25,108 @@ bun install
 }
 ```
 
-#### 使用 pnpm 安装（推荐）
+说明：OpenCode 会在启动时用 Bun 自动安装 `plugin` 列表里的 npm 包。
 
-```bash
-pnpm add opencode-hello-world
-```
+### 2) 配置 OCDX（必需）
 
-如果你还没有发布到 npm，可以先在本仓库目录生成一个安装包，然后在目标项目中安装：
+在项目根目录创建 `.opencode/ocdx.json`（参考：`docs/CONFIGURATION.md`）：
 
-```bash
-# 在本仓库
-pnpm pack
-
-# 在目标项目目录（示例）
-pnpm add ../opencode-hello-world-0.1.0.tgz
-```
-
-## 插件功能
-
-### 自定义工具
-
-#### 1. `hello`
-
-向某人问候
-
-```typescript
-// 使用示例
-await hello({ name: 'World' });
-// 返回: "👋 Hello, World! Welcome to OpenCode!"
-```
-
-#### 2. `check_directory`
-
-检查当前目录信息
-
-```typescript
-// 使用示例
-await check_directory();
-// 返回目录文件列表和 git 状态
-```
-
-### 事件处理
-
-插件监听以下 OpenCode 事件：
-
-- `session.created` - 新会话创建时记录日志
-- `session.idle` / `session.deleted` - 会话结束时统计执行时长和工具使用次数
-- `message.part.updated` - 跟踪工具执行次数
-
-### 配置扩展
-
-插件自动添加自定义命令：
-
-```bash
-# 在 OpenCode 中使用
-/hello
-```
-
-## 开发
-
-### 构建
-
-```bash
-pnpm run build
-```
-
-### 代码检查
-
-```bash
-pnpm run lint
-pnpm run format
-```
-
-### 目录结构
-
-```
-opencode-hello-world/
-├── src/
-│   ├── index.ts          # 插件主文件
-│   └── version.ts        # 版本信息
-├── dist/                 # 编译输出
-├── package.json
-├── tsconfig.json
-├── eslint.config.js
-├── .prettierrc
-└── README.md
-```
-
-## 最佳实践
-
-本插件展示了以下 OpenCode 插件开发最佳实践：
-
-### 1. 插件函数签名
-
-```typescript
-import type { Plugin } from '@opencode-ai/plugin';
-
-export const HelloWorldPlugin: Plugin = async ({ client, directory, $ }) => {
-  // 初始化代码
-  return {
-    tool: {
-      /* 工具定义 */
-    },
-    event: async ({ event }) => {
-      /* 事件处理 */
-    },
-    config: async (opencodeConfig) => {
-      /* 配置修改 */
-    },
-  };
-};
-
-export default HelloWorldPlugin;
-```
-
-### 2. 工具定义
-
-```typescript
-import { tool } from '@opencode-ai/plugin';
-
-tool: {
-  mytool: tool({
-    description: '工具描述',
-    args: {
-      name: tool.schema.string().describe('参数描述'),
-    },
-    async execute(args, ctx) {
-      return `结果`;
-    },
-  }),
+```json
+{
+  "models": {
+    "high": "anthropic/claude-3-7-sonnet-20250219",
+    "medium": "anthropic/claude-3-5-sonnet-20241022",
+    "low": "anthropic/claude-3-5-haiku-20241022"
+  },
+  "reviewerModels": ["anthropic/claude-3-7-sonnet-20250219"],
+  "commentsAnalyzerModel": "anthropic/claude-3-5-haiku-20241022",
+  "prFixModel": "anthropic/claude-3-7-sonnet-20250219"
 }
 ```
 
-### 3. 结构化日志
+### 3) 使用命令
 
-```typescript
-await client.app.log({
-  service: 'plugin-name',
-  level: 'info', // debug, info, warn, error
-  message: '日志消息',
-  extra: { key: 'value' },
-});
+PR Review Loop：
+
+```bash
+/pr-review-loop
+/pr-review-loop --pr <PR_NUMBER>
 ```
 
-### 4. 会话状态管理
+运行项目内 skills：
 
-```typescript
-const sessions = new Map<string, SessionData>();
-
-// 在 session.created 时创建
-// 在 session.deleted 时清理
+```bash
+/ocdx
+/ocdx <keyword>
 ```
 
-### 5. Shell 命令执行
+### 4) 添加 project skills（可选）
 
-```typescript
-// 使用 Bun 的 shell API
-const output = await $`ls -la ${directory}`.text();
+放到：`.opencode/skills/<name>/SKILL.md`
+
+```md
+---
+name: my-skill
+description: Do something useful
+model: high
+---
+
+...skill instructions...
 ```
 
-## 参考资源
+`model` 支持：
 
-- [OpenCode 官方文档](https://opencode.ai/docs/plugins/)
-- [插件 SDK](https://opencode.ai/docs/sdk/)
-- [插件模板](https://github.com/zenobi-us/opencode-plugin-template)
-- [插件生态](https://opencode.ai/docs/ecosystem/)
+- `high|medium|low`：映射到 `.opencode/ocdx.json` 的 `models.*`
+- `provider/model`：直接指定模型
 
-## 许可证
+---
+
+## 开发者说明（维护/发布）
+
+### 本地开发
+
+```bash
+pnpm install
+pnpm run build
+pnpm run lint
+pnpm run format:check
+```
+
+### 打包（生成 tgz）
+
+`prepack` 会自动 `clean + build`，保证 `dist/` 存在：
+
+```bash
+pnpm pack
+```
+
+### 发布到 npm
+
+```bash
+pnpm publish
+```
+
+发布前建议检查包内容：
+
+```bash
+npm pack --dry-run
+```
+
+### 插件暴露的工具/子代理（给开发者定位问题用）
+
+- tools：`ocdx_pr_review_loop`、`ocdx_list_skills`、`ocdx_run_skill`、`check_directory`
+- commands：`/pr-review-loop`、`/ocdx`
+- subagents：`ocdx-reviewer`、`ocdx-comments-analyzer`、`ocdx-pr-fix`、`ocdx-skill-runner`
+
+---
+
+## 参考文档
+
+- `docs/QUICK_START.md`
+- `docs/CONFIGURATION.md`
+- `docs/pr-review-loop-reference.md`
+- OpenCode Plugins: https://opencode.ai/docs/plugins/
+
+## License
 
 MIT
-
-## 作者
-
-你的名字

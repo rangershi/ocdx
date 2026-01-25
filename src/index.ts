@@ -144,18 +144,6 @@ export const HelloWorldPlugin: OpenCodePlugin = async ({ client, directory, $ })
      * Custom Tools
      */
     tool: {
-      // Simple greeting tool
-      hello: tool({
-        description: 'Say hello to someone',
-        args: {
-          name: tool.schema.string().describe('Name to greet'),
-        },
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        async execute(args, _ctx) {
-          return `👋 Hello, ${args.name}! Welcome to OpenCode!`;
-        },
-      }),
-
       // Tool that executes shell commands
       check_directory: tool({
         description: 'Check current directory information',
@@ -1029,219 +1017,6 @@ ${roundHistory.map((r) => `- Round ${r.round}: ${r.consensus} (P0:${r.totalCount
            `;
         },
       }),
-
-      doctor: tool({
-        description:
-          'Check OpenCode environment health: verify required packages, validate opencode.json, and auto-fix issues',
-        args: {
-          fix: tool.schema
-            .boolean()
-            .optional()
-            .describe('Automatically fix issues without confirmation (default: false)'),
-        },
-        async execute(args, ctx) {
-          try {
-            let aiModel: string = 'anthropic/claude-3-5-haiku-20241022';
-            try {
-              const config = await loadOcdxConfigStrict(directory);
-              aiModel = config.models?.low || config.commentsAnalyzerModel || aiModel;
-            } catch {
-              // Continue with default model
-            }
-
-            parseModelString(aiModel);
-
-            const requiredPackages = [
-              'oh-my-opencode',
-              'opencode-openai-codex-auth',
-              'opencode-antigravity-auth',
-              'agent-browser',
-            ];
-
-            const packageIssues: Array<{
-              name: string;
-              installed: boolean;
-              installedVersion?: string;
-              latestVersion?: string;
-              needsUpdate: boolean;
-            }> = [];
-
-            for (const pkg of requiredPackages) {
-              try {
-                const listOutput = await $`npm list -g ${pkg} --depth=0 --json`
-                  .throws(false)
-                  .quiet()
-                  .text();
-
-                let installed = false;
-                let installedVersion: string | undefined;
-
-                try {
-                  const listData = JSON.parse(listOutput);
-                  if (listData.dependencies?.[pkg]) {
-                    installed = true;
-                    installedVersion = listData.dependencies[pkg].version;
-                  }
-                } catch {
-                  installed = listOutput.includes(pkg) && !listOutput.includes('(empty)');
-                }
-
-                let latestVersion: string | undefined;
-                try {
-                  latestVersion = (
-                    await $`npm view ${pkg} version`.throws(false).quiet().text()
-                  ).trim();
-                } catch {
-                  // Continue if npm view fails
-                }
-
-                const needsUpdate =
-                  !installed ||
-                  (installedVersion && latestVersion && installedVersion !== latestVersion);
-
-                if (!installed || needsUpdate) {
-                  packageIssues.push({
-                    name: pkg,
-                    installed,
-                    installedVersion,
-                    latestVersion,
-                    needsUpdate: !!needsUpdate,
-                  });
-                }
-              } catch {
-                packageIssues.push({ name: pkg, installed: false, needsUpdate: true });
-              }
-            }
-
-            const opencodeJsonPath = join(directory, 'opencode.json');
-            let opencodeJsonIssue: string | null = null;
-
-            try {
-              const opencodeJsonContent = await $`cat ${opencodeJsonPath}`
-                .throws(false)
-                .quiet()
-                .text();
-
-              if (!opencodeJsonContent || opencodeJsonContent.includes('No such file')) {
-                opencodeJsonIssue = 'missing';
-              } else {
-                try {
-                  const config = JSON.parse(opencodeJsonContent);
-                  const hasInstructions = config.instructions && Array.isArray(config.instructions);
-                  const hasAgentsMd = config.instructions?.includes('AGENTS.md');
-                  const hasRulerGlob = config.instructions?.some((i: string) =>
-                    i.includes('ruler/**/*.md')
-                  );
-
-                  if (!hasInstructions || !hasAgentsMd || !hasRulerGlob) {
-                    opencodeJsonIssue = 'incomplete';
-                  }
-                } catch {
-                  opencodeJsonIssue = 'invalid_json';
-                }
-              }
-            } catch {
-              opencodeJsonIssue = 'missing';
-            }
-
-            const hasIssues = packageIssues.length > 0 || opencodeJsonIssue !== null;
-
-            if (!hasIssues) {
-              return `✅ OpenCode Environment Health Check
-
-**Status:** All checks passed
-
-**Packages:**
-${requiredPackages.map((pkg) => `  ✓ ${pkg} - installed and up to date`).join('\n')}
-
-**Configuration:**
-  ✓ opencode.json - valid
-
-**AI Model:** ${aiModel}`;
-            }
-
-            let report = `⚠️ OpenCode Environment Health Check
-
-**AI Model:** ${aiModel}
-
-**Issues Found:**
-
-`;
-
-            if (packageIssues.length > 0) {
-              report += `**Packages:**\n`;
-              for (const issue of packageIssues) {
-                if (!issue.installed) {
-                  report += `  ✗ ${issue.name} - not installed\n`;
-                } else if (issue.needsUpdate) {
-                  report += `  ⚠ ${issue.name} - ${issue.installedVersion} → ${issue.latestVersion || 'unknown'} (update available)\n`;
-                }
-              }
-              report += '\n';
-            }
-
-            if (opencodeJsonIssue) {
-              report += `**Configuration:**\n`;
-              if (opencodeJsonIssue === 'missing') {
-                report += `  ✗ opencode.json - not found at ${opencodeJsonPath}\n`;
-              } else if (opencodeJsonIssue === 'invalid_json') {
-                report += `  ✗ opencode.json - invalid JSON format\n`;
-              } else if (opencodeJsonIssue === 'incomplete') {
-                report += `  ⚠ opencode.json - missing required instructions\n`;
-              }
-              report += '\n';
-            }
-
-            if (args.fix) {
-              report += `**Auto-fixing issues...**\n\n`;
-
-              for (const issue of packageIssues) {
-                try {
-                  const version = issue.latestVersion || 'latest';
-                  report += `Installing ${issue.name}@${version}...\n`;
-                  await $`npm install -g ${issue.name}@${version}`.quiet();
-                  report += `  ✓ ${issue.name} installed successfully\n`;
-                } catch (error) {
-                  report += `  ✗ Failed to install ${issue.name}: ${error}\n`;
-                }
-              }
-
-              if (opencodeJsonIssue) {
-                try {
-                  const defaultConfig = {
-                    $schema: 'https://opencode.ai/config.json',
-                    instructions: ['AGENTS.md', 'ruler/**/*.md'],
-                  };
-
-                  await writeFile(
-                    opencodeJsonPath,
-                    JSON.stringify(defaultConfig, null, 2),
-                    'utf-8'
-                  );
-                  report += `  ✓ Created opencode.json at ${opencodeJsonPath}\n`;
-                } catch (error) {
-                  report += `  ✗ Failed to create opencode.json: ${error}\n`;
-                }
-              }
-
-              report += `\n**Re-running health check...**\n`;
-
-              const recheck = await this.execute({ fix: false }, ctx);
-              return report + '\n' + recheck;
-            } else {
-              report += `**Recommended Actions:**\n`;
-              report += `Run with --fix flag to automatically resolve these issues:\n`;
-              report += `\`\`\`\n/doctor --fix\n\`\`\`\n`;
-            }
-
-            return report;
-          } catch (error) {
-            return `❌ Doctor Check Failed
-
-Error: ${error instanceof Error ? error.message : String(error)}`;
-          }
-        },
-      }),
     },
 
     /**
@@ -1308,7 +1083,7 @@ Usage:
 Do not do any other work besides calling the tool.`,
       };
 
-      opencodeConfig.command['ocdx-run-skill'] = {
+      const ocdxSkillCommand = {
         description: 'Run a project SKILL.md from .opencode/skills using tiered model mapping',
         template: `You are a command dispatcher for running OCDX skills.
 
@@ -1332,6 +1107,9 @@ Steps:
 
 Do not do any other work besides calling the tools.`,
       };
+
+      // Primary short command
+      opencodeConfig.command['ocdx'] = ocdxSkillCommand;
 
       // Define agents for PR review workflow (read-only reviewers, editable pr-fix)
       opencodeConfig.agent ??= {};
