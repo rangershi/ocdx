@@ -11,3 +11,8 @@ coverage/
 .bun/
 .bun.lockb
 .memory/
+
+.sisyphus/
+
+# Optional: Uncomment to ignore project-level OCDX config
+# .opencode/ocdx.json
