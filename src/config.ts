@@ -7,12 +7,30 @@ import * as fs from 'fs/promises';
  * Loaded from ~/.config/opencode/ocdx.json
  */
 export interface OcdxConfig {
+  /** Optional model tiers for different cost/quality tradeoffs */
+  models?: {
+    /** High quality / higher cost model */
+    high?: string;
+    /** Medium tradeoff model */
+    medium?: string;
+    /** Low cost / fast model */
+    low?: string;
+  };
   /** Array of 1-5 reviewer model strings (e.g., "anthropic/claude-3-5-sonnet-20241022") */
   reviewerModels: string[];
   /** Model for analyzing PR comments (non-empty string) */
   commentsAnalyzerModel: string;
   /** Model for generating PR fixes (non-empty string) */
   prFixModel: string;
+  /** Optional custom prompt file paths (absolute or relative). If not provided, uses bundled prompts. */
+  prompts?: {
+    /** Optional custom path to reviewer prompt template (supports ~ expansion and relative paths) */
+    reviewer?: string;
+    /** Optional custom path to comments-analyzer prompt template (supports ~ expansion and relative paths) */
+    commentsAnalyzer?: string;
+    /** Optional custom path to pr-fix prompt template (supports ~ expansion and relative paths) */
+    prFix?: string;
+  };
 }
 
 /**
@@ -34,13 +52,28 @@ export class ConfigError extends Error {
  * Example configuration JSON for error messages
  */
 const EXAMPLE_CONFIG_JSON = `{
+  "models": {
+    "high": "anthropic/claude-3-7-sonnet-20250219",
+    "medium": "anthropic/claude-3-5-sonnet-20241022",
+    "low": "anthropic/claude-3-5-haiku-20241022"
+  },
   "reviewerModels": ["anthropic/claude-3-5-sonnet-20241022"],
   "commentsAnalyzerModel": "anthropic/claude-3-5-sonnet-20241022",
-  "prFixModel": "anthropic/claude-3-5-sonnet-20241022"
+  "prFixModel": "anthropic/claude-3-5-sonnet-20241022",
+  "prompts": {
+    "reviewer": "~/.config/opencode/prompts/my-reviewer.md",
+    "commentsAnalyzer": "~/.config/opencode/prompts/my-analyzer.md",
+    "prFix": "~/.config/opencode/prompts/my-fix.md"
+  }
 }`;
 
 /**
- * Load and validate OCDX configuration from ~/.config/opencode/ocdx.json
+ * Load and validate OCDX configuration with project-level override support
+ *
+ * Configuration file search order (first found wins):
+ * 1. Project-level: `<projectRoot>/.opencode/ocdx.json`
+ * 2. Project-level: `<projectRoot>/ocdx.json`
+ * 3. Global-level: `~/.config/opencode/ocdx.json`
  *
  * Validation rules:
  * - reviewerModels: array of 1-5 non-empty strings
@@ -48,7 +81,7 @@ const EXAMPLE_CONFIG_JSON = `{
  * - prFixModel: non-empty string
  *
  * Error codes thrown:
- * - CONFIG_NOT_FOUND: Config file does not exist
+ * - CONFIG_NOT_FOUND: Config file does not exist in any location
  * - CONFIG_INVALID_JSON: File contains invalid JSON
  * - CONFIG_MISSING_FIELDS: Required fields are missing
  * - CONFIG_INVALID_REVIEWERS: reviewerModels array invalid (empty, >5 entries, or contains empty strings)
@@ -57,7 +90,7 @@ const EXAMPLE_CONFIG_JSON = `{
  * Example usage:
  * ```typescript
  * try {
- *   const config = await loadOcdxConfigStrict();
+ *   const config = await loadOcdxConfigStrict('/path/to/project');
  *   console.log(config.reviewerModels);
  * } catch (error) {
  *   if (error instanceof ConfigError) {
@@ -68,12 +101,40 @@ const EXAMPLE_CONFIG_JSON = `{
  * }
  * ```
  *
+ * @param projectRoot - Project root directory (defaults to current working directory)
  * @returns Promise<OcdxConfig> Validated configuration object
  * @throws {ConfigError} If config file is missing, invalid, or fails validation
  */
-export async function loadOcdxConfigStrict(): Promise<OcdxConfig> {
-  // 1. Resolve config path
-  const configPath = path.join(os.homedir(), '.config', 'opencode', 'ocdx.json');
+export async function loadOcdxConfigStrict(projectRoot?: string): Promise<OcdxConfig> {
+  // 1. Resolve config path with project-level override support
+  const cwd = projectRoot || process.cwd();
+  const configPaths = [
+    path.join(cwd, '.opencode', 'ocdx.json'), // Project-level (OpenCode convention)
+    path.join(cwd, 'ocdx.json'), // Project-level (root)
+    path.join(os.homedir(), '.config', 'opencode', 'ocdx.json'), // Global fallback
+  ];
+
+  let configPath: string | null = null;
+  for (const candidatePath of configPaths) {
+    try {
+      await fs.access(candidatePath);
+      configPath = candidatePath;
+      break;
+    } catch {
+      // File doesn't exist, try next candidate
+      continue;
+    }
+  }
+
+  if (!configPath) {
+    const searchedPaths = configPaths.join('\n  - ');
+    throw new ConfigError(
+      'CONFIG_NOT_FOUND',
+      `Config file not found in any of these locations:\n  - ${searchedPaths}\n\nPlease create one with the following structure:\n${EXAMPLE_CONFIG_JSON}`,
+      configPaths[0], // Use first candidate for error reporting
+      EXAMPLE_CONFIG_JSON
+    );
+  }
 
   // 2. Read file contents
   let fileContents: string;
@@ -191,10 +252,42 @@ export async function loadOcdxConfigStrict(): Promise<OcdxConfig> {
     );
   }
 
+  // Validate optional models tiers
+  if ('models' in config && config.models !== undefined) {
+    if (
+      typeof config.models !== 'object' ||
+      config.models === null ||
+      Array.isArray(config.models)
+    ) {
+      throw new ConfigError(
+        'CONFIG_INVALID_SCHEMA',
+        `models must be an object\n\nExpected format:\n${EXAMPLE_CONFIG_JSON}`,
+        configPath,
+        EXAMPLE_CONFIG_JSON
+      );
+    }
+
+    const models = config.models as Record<string, unknown>;
+    for (const key of ['high', 'medium', 'low'] as const) {
+      if (key in models && models[key] !== undefined) {
+        if (typeof models[key] !== 'string' || (models[key] as string).trim() === '') {
+          throw new ConfigError(
+            'CONFIG_INVALID_SCHEMA',
+            `models.${key} must be a non-empty string\n\nExpected format:\n${EXAMPLE_CONFIG_JSON}`,
+            configPath,
+            EXAMPLE_CONFIG_JSON
+          );
+        }
+      }
+    }
+  }
+
   // Return validated config
   return {
+    models: config.models as OcdxConfig['models'],
     reviewerModels: config.reviewerModels as string[],
     commentsAnalyzerModel: config.commentsAnalyzerModel as string,
     prFixModel: config.prFixModel as string,
+    prompts: config.prompts as OcdxConfig['prompts'],
   };
 }

@@ -11,9 +11,9 @@ import type {
   Finding,
   FixResult,
 } from './pr-review-loop/types';
-import { writeFile, unlink } from 'fs/promises';
+import { access, readFile, readdir, writeFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 
 /**
  * Resolve asset file paths (works from both src/ in dev mode and dist/ when compiled)
@@ -29,6 +29,99 @@ export function assetUrl(relFromRepoRoot: string): URL {
   const moduleDir = new URL('.', import.meta.url);
   const repoRoot = new URL('..', moduleDir); // parent of src/ or dist/
   return new URL(relFromRepoRoot, repoRoot);
+}
+
+type OcdxSkillSummary = {
+  name: string;
+  description: string;
+  path: string;
+  model?: string;
+};
+
+function stripQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function parseSimpleYamlFrontMatter(markdown: string): {
+  data: Record<string, string>;
+  body: string;
+} {
+  const match = markdown.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
+  if (!match) {
+    return { data: {}, body: markdown };
+  }
+
+  const raw = match[1] ?? '';
+  const data: Record<string, string> = {};
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    if (trimmed.startsWith('-')) continue;
+
+    const kv = trimmed.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+    if (!kv) continue;
+    const key = kv[1];
+    const value = stripQuotes(kv[2] ?? '');
+    if (!value) continue;
+    data[key] = value;
+  }
+
+  return {
+    data,
+    body: markdown.slice(match[0].length),
+  };
+}
+
+async function exists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function findProjectRoot(startDir: string): Promise<string> {
+  let current = startDir;
+  for (;;) {
+    if (await exists(join(current, '.git'))) return current;
+    const parent = dirname(current);
+    if (parent === current) return startDir;
+    current = parent;
+  }
+}
+
+async function listOcdxSkills(projectRoot: string): Promise<OcdxSkillSummary[]> {
+  const skillsDir = join(projectRoot, '.opencode', 'skills');
+  if (!(await exists(skillsDir))) return [];
+
+  const entries = await readdir(skillsDir, { withFileTypes: true });
+  const skills: OcdxSkillSummary[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const skillPath = join(skillsDir, entry.name, 'SKILL.md');
+    if (!(await exists(skillPath))) continue;
+
+    const content = await readFile(skillPath, 'utf-8');
+    const { data } = parseSimpleYamlFrontMatter(content);
+    // OpenCode requires frontmatter name to match the directory name; we use the directory name as canonical.
+    const name = entry.name;
+    const description = data.description || '';
+    const model = data.model;
+
+    if (!description) continue;
+    skills.push({ name, description, path: skillPath, model });
+  }
+
+  skills.sort((a, b) => a.name.localeCompare(b.name));
+  return skills;
 }
 
 /**
@@ -92,6 +185,141 @@ ${gitStatus}
           } catch (error) {
             return `Error checking directory: ${error}`;
           }
+        },
+      }),
+
+      ocdx_list_skills: tool({
+        description: 'List project skills from .opencode/skills/*/SKILL.md (OCDX only)',
+        args: {
+          query: tool.schema
+            .string()
+            .optional()
+            .describe('Optional substring filter (matches skill name/description)'),
+          limit: tool.schema
+            .number()
+            .optional()
+            .describe('Maximum number of skills to return (default: 50)'),
+        },
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        async execute(args, _ctx) {
+          const projectRoot = await findProjectRoot(directory);
+          const allSkills = await listOcdxSkills(projectRoot);
+
+          const query = (args.query || '').trim().toLowerCase();
+          const limit = Math.max(1, Math.min(200, args.limit ?? 50));
+
+          const skills = allSkills
+            .filter((s) => {
+              if (!query) return true;
+              return (
+                s.name.toLowerCase().includes(query) || s.description.toLowerCase().includes(query)
+              );
+            })
+            .slice(0, limit);
+
+          return JSON.stringify(
+            {
+              projectRoot,
+              skillsDir: join(projectRoot, '.opencode', 'skills'),
+              count: skills.length,
+              skills,
+            },
+            null,
+            2
+          );
+        },
+      }),
+
+      ocdx_run_skill: tool({
+        description:
+          'Run a project skill from .opencode/skills via a subagent with model tier mapping (high|medium|low)',
+        args: {
+          name: tool.schema.string().describe('Skill name (folder name under .opencode/skills)'),
+          arguments: tool.schema
+            .string()
+            .optional()
+            .describe('Optional extra arguments passed to the skill'),
+        },
+        async execute(args, _ctx) {
+          const projectRoot = await findProjectRoot(directory);
+          const skillPath = join(projectRoot, '.opencode', 'skills', args.name, 'SKILL.md');
+
+          if (!(await exists(skillPath))) {
+            return `❌ Skill not found: ${args.name}
+
+Expected path:
+${skillPath}
+
+Note: ocdx_run_skill only looks for skills under .opencode/skills/<name>/SKILL.md.`;
+          }
+
+          const content = await readFile(skillPath, 'utf-8');
+          const { data, body: skillBody } = parseSimpleYamlFrontMatter(content);
+
+          const selectorRaw = (data.model || '').trim();
+          const selector = selectorRaw.toLowerCase();
+
+          let modelString: string | undefined;
+          let config;
+
+          if (selector === 'high' || selector === 'medium' || selector === 'low') {
+            config = await loadOcdxConfigStrict(projectRoot);
+            modelString = config.models?.[selector];
+            if (!modelString) {
+              return `❌ Skill model tier '${selector}' is not configured in .opencode/ocdx.json (missing models.${selector}).`;
+            }
+          } else if (selectorRaw.includes('/')) {
+            modelString = selectorRaw;
+          } else {
+            // Default: medium tier if available
+            config = await loadOcdxConfigStrict(projectRoot);
+            modelString = config.models?.medium || config.reviewerModels?.[0];
+          }
+
+          if (!modelString) {
+            return `❌ Unable to resolve model for skill '${args.name}'.
+
+Provide either:
+- model: high|medium|low (and configure models.* in .opencode/ocdx.json)
+- model: provider/model`;
+          }
+
+          const { providerID, modelID } = parseModelString(modelString);
+
+          const promptParts = [
+            `You are running the OpenCode skill "${args.name}".`,
+            `Follow the skill instructions.`,
+            '',
+            '## Skill',
+            skillBody.trim(),
+          ];
+
+          const extraArgs = (args.arguments || '').trim();
+          if (extraArgs) {
+            promptParts.push('', '## Arguments', extraArgs);
+          }
+
+          const prompt = promptParts.join('\n');
+
+          const skillSession = await client.session.create({
+            body: { parentID: _ctx.sessionID },
+            query: { directory },
+          });
+
+          const skillResponse = await client.session.prompt({
+            path: { id: skillSession.data!.id },
+            query: { directory },
+            body: {
+              model: { providerID, modelID },
+              agent: 'ocdx-skill-runner',
+              parts: [{ type: 'text', text: prompt }],
+            },
+          });
+
+          return skillResponse
+            .data!.parts.filter((part: any) => part.type === 'text')
+            .map((part: any) => part.text)
+            .join('\n');
         },
       }),
 
@@ -1059,12 +1287,8 @@ Error: ${error instanceof Error ? error.message : String(error)}`;
      * Modify OpenCode configuration
      */
     config: async (opencodeConfig) => {
-      // Add custom command
+      // Add custom commands
       opencodeConfig.command ??= {};
-      opencodeConfig.command['hello'] = {
-        template: 'Use the hello tool to greet me!',
-        description: 'Quick greeting command',
-      };
 
       opencodeConfig.command['pr-review-loop'] = {
         description: 'Run multi-model PR review + auto-fix loop',
@@ -1082,6 +1306,31 @@ Usage:
   /pr-review-loop --pr <PR_NUMBER>
 
 Do not do any other work besides calling the tool.`,
+      };
+
+      opencodeConfig.command['ocdx-run-skill'] = {
+        description: 'Run a project SKILL.md from .opencode/skills using tiered model mapping',
+        template: `You are a command dispatcher for running OCDX skills.
+
+Raw arguments: "$ARGUMENTS"
+
+Goal:
+- Help the user run one of the project skills located under .opencode/skills/<name>/SKILL.md
+- You MUST call tools only; do not do any other work.
+
+Steps:
+1) If $ARGUMENTS is empty: call tool ocdx_list_skills with {}.
+2) If $ARGUMENTS is non-empty: call tool ocdx_list_skills with {"query":"$ARGUMENTS"}.
+3) The tool returns JSON: { count, skills: [{ name, description, model?, path }] }.
+4) If count == 0: explain that skills must be in .opencode/skills/<name>/SKILL.md and stop.
+5) If count == 1: call tool ocdx_run_skill with {"name": skills[0].name} and stop.
+6) If count > 1:
+   - Ask the user to choose using the question tool.
+   - Use numeric labels ("1", "2", ...) to avoid long skill names.
+   - Each option description must include the full skill name and description.
+   - After selection, call tool ocdx_run_skill with the chosen skill name.
+
+Do not do any other work besides calling the tools.`,
       };
 
       // Define agents for PR review workflow (read-only reviewers, editable pr-fix)
@@ -1113,6 +1362,25 @@ Do not do any other work besides calling the tool.`,
       };
 
       opencodeConfig.agent['ocdx-pr-fix'] = {
+        mode: 'subagent',
+        tools: {
+          bash: true,
+          read: true,
+          grep: true,
+          glob: true,
+          edit: true,
+        },
+        permission: {
+          edit: 'allow',
+          bash: {
+            deny: ['git push --force*', 'git push -f*'],
+            allow: ['dx *', 'git status*', 'git diff*', 'git add*', 'git commit*'],
+            ask: ['git push*'],
+          },
+        },
+      } as any;
+
+      opencodeConfig.agent['ocdx-skill-runner'] = {
         mode: 'subagent',
         tools: {
           bash: true,

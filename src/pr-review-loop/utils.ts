@@ -1,4 +1,6 @@
 import { readFile } from 'fs/promises';
+import * as os from 'os';
+import * as path from 'path';
 
 import { assetUrl } from '../index';
 
@@ -69,22 +71,51 @@ export function extractJsonEnvelope(text: string): any | null {
 /**
  * Load a prompt asset file from the pr-review-loop prompts directory
  *
- * Resolves the asset path using assetUrl() helper and reads the file as UTF-8.
- * The file is expected to be in src/prompts/pr-review-loop/ directory.
+ * Supports:
+ * 1. Custom absolute path (if provided and starts with / or ~)
+ * 2. Custom relative path (if provided, relative to repo root)
+ * 3. Default bundled path (fallback)
  *
  * @param name - Prompt file name (e.g., "reviewer.md", "comments-analyzer.md")
+ * @param customPath - Optional custom path from config (absolute or relative)
  * @returns Promise that resolves to the full file contents as a string
  * @throws Error if the file does not exist or cannot be read
  *
  * @example
+ * // Default bundled prompt
  * const reviewerPrompt = await loadPromptAsset("reviewer.md");
  * // Returns: Full contents of src/prompts/pr-review-loop/reviewer.md
  *
  * @example
- * const fixPrompt = await loadPromptAsset("pr-fix.md");
- * // Returns: Full contents of src/prompts/pr-review-loop/pr-fix.md
+ * // Custom absolute path with ~ expansion
+ * const reviewerPrompt = await loadPromptAsset("reviewer.md", "~/.config/opencode/prompts/my-reviewer.md");
+ *
+ * @example
+ * // Custom relative path
+ * const reviewerPrompt = await loadPromptAsset("reviewer.md", "prompts/custom-reviewer.md");
  */
-export async function loadPromptAsset(name: string): Promise<string> {
-  const assetPath = assetUrl(`src/prompts/pr-review-loop/${name}`);
-  return readFile(assetPath, 'utf-8');
+export async function loadPromptAsset(name: string, customPath?: string): Promise<string> {
+  let resolvedPath: URL;
+
+  if (customPath) {
+    // Handle ~ expansion
+    if (customPath.startsWith('~/')) {
+      const homeDir = os.homedir();
+      const expandedPath = path.join(homeDir, customPath.slice(2));
+      resolvedPath = new URL(`file://${expandedPath}`);
+    }
+    // Handle absolute path
+    else if (customPath.startsWith('/')) {
+      resolvedPath = new URL(`file://${customPath}`);
+    }
+    // Handle relative path (relative to repo root)
+    else {
+      resolvedPath = assetUrl(customPath);
+    }
+  } else {
+    // Default: use bundled prompts
+    resolvedPath = assetUrl(`src/prompts/pr-review-loop/${name}`);
+  }
+
+  return readFile(resolvedPath, 'utf-8');
 }
