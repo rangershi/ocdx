@@ -1,0 +1,15 @@
+{
+  "models": {
+    "high": "anthropic/claude-3-7-sonnet-20250219",
+    "medium": "anthropic/claude-3-5-sonnet-20241022",
+    "low": "anthropic/claude-3-5-haiku-20241022"
+  },
+  "reviewerModels": ["anthropic/claude-3-7-sonnet-20250219", "anthropic/claude-3-5-haiku-20241022"],
+  "commentsAnalyzerModel": "anthropic/claude-3-5-haiku-20241022",
+  "prFixModel": "anthropic/claude-3-7-sonnet-20250219",
+  "prompts": {
+    "reviewer": "docs/prompt-examples/reviewer/security-focused-reviewer.md",
+    "commentsAnalyzer": "docs/prompt-examples/comments-analyzer/strict-analyzer.md",
+    "prFix": "docs/prompt-examples/pr-fix/conservative-fix.md"
+  }
+}
