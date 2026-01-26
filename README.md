@@ -14,6 +14,8 @@ README 分两部分：
 
 ## 使用者快速上手（OpenCode 用户）
 
+你只需要在项目的 `opencode.json` 里声明插件即可：OpenCode 会在启动时用 Bun 自动安装 npm 插件。
+
 ### 1) 安装插件
 
 在你的项目 `opencode.json` 加上插件：
@@ -25,11 +27,32 @@ README 分两部分：
 }
 ```
 
-说明：OpenCode 会在启动时用 Bun 自动安装 `plugin` 列表里的 npm 包。
+说明：OpenCode 会在启动时用 Bun 自动安装 `plugin` 列表里的 npm 包（缓存到 `~/.cache/opencode/node_modules/`）。
+
+安装后你会获得两个 slash 命令：
+
+- `/pr-review-loop`
+- `/ocdx`
+
+OpenCode 插件机制参考：https://opencode.ai/docs/plugins/
+
+### 1.1) 运行前置条件（/pr-review-loop 必需）
+
+`/pr-review-loop` 会调用外部 CLI（见 `src/pr-review-loop/preflight.ts` 的 preflight 检查），因此你需要：
+
+- 已安装并登录 GitHub CLI：`gh auth login`
+- 已安装 `dx` CLI，并且至少包含 `dx lint`、`dx build` 子命令
+- 在一个 git 仓库内运行
+- 工作区必须干净（`git status --porcelain` 为空）
+- 必须在一个真实分支上（不能 detached HEAD）
 
 ### 2) 配置 OCDX（必需）
 
-在项目根目录创建 `.opencode/ocdx/config.json`（参考：`docs/CONFIGURATION.md`）：
+推荐在项目根目录创建 `.opencode/ocdx/config.json`：
+
+- 这是“项目级配置”，优先级最高
+- 如果没有项目级配置，会回退到全局配置 `~/.config/opencode/ocdx/config.json`（或 `XDG_CONFIG_HOME`）
+- 如果两者都不存在，会使用插件内置默认值（见 `@asset/config.json`）
 
 ```json
 {
@@ -44,6 +67,14 @@ README 分两部分：
 }
 ```
 
+字段说明（最常用）：
+
+- `reviewerModels`：1-5 个 reviewer 模型（会并行跑）
+- `commentsAnalyzerModel`：评论线程分析模型（用于判断是否存在未解决的人类 review 阻塞项）
+- `prFixModel`：自动修复模型
+- `models.high|medium|low`：给 `/ocdx` skills 使用的 tier 映射（可选）
+- `prompts.*`：覆盖默认 prompt（可选；默认使用插件内置 prompt）
+
 ### 3) 使用命令
 
 PR Review Loop：
@@ -53,6 +84,11 @@ PR Review Loop：
 /pr-review-loop --pr <PR_NUMBER>
 ```
 
+说明：
+
+- 不传 `--pr` 时会尝试从当前分支自动检测 PR
+- preflight 不通过时会直接给出可执行的错误提示（例如 `gh` 未登录、`dx` 不存在、工作区不干净等）
+
 运行项目内 skills：
 
 ```bash
@@ -60,9 +96,16 @@ PR Review Loop：
 /ocdx <keyword>
 ```
 
+说明：
+
+- `/ocdx` 会在以下路径查找 SKILL.md（项目级优先于全局）：
+  - 项目级：`.opencode/ocdx/skills/<name>/SKILL.md`
+  - 全局：`~/.config/opencode/ocdx/skills/<name>/SKILL.md`（或 `XDG_CONFIG_HOME`）
+- `/ocdx <keyword>` 会用关键字过滤技能（name/description）
+
 ### 4) 添加 project skills（可选）
 
-放到（项目级）：`.opencode/skills/<name>/SKILL.md`
+放到（项目级）：`.opencode/ocdx/skills/<name>/SKILL.md`
 
 放到（全局）：`~/.config/opencode/ocdx/skills/<name>/SKILL.md`
 
@@ -124,8 +167,6 @@ npm pack --dry-run
 
 ## 参考文档
 
-- `docs/QUICK_START.md`
-- `docs/CONFIGURATION.md`
 - `docs/pr-review-loop-reference.md`
 - OpenCode Plugins: https://opencode.ai/docs/plugins/
 

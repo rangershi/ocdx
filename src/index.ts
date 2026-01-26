@@ -141,7 +141,7 @@ async function listSkillsInDir(
 }
 
 async function listOcdxSkills(projectRoot: string): Promise<OcdxSkillSummary[]> {
-  const projectSkillsDir = join(projectRoot, '.opencode', 'skills');
+  const projectSkillsDir = join(projectRoot, '.opencode', 'ocdx', 'skills');
   const globalSkillsDir = join(getConfigHome(), 'opencode', 'ocdx', 'skills');
 
   const [globalSkills, projectSkills] = await Promise.all([
@@ -211,7 +211,7 @@ ${gitStatus}
 
       ocdx_list_skills: tool({
         description:
-          'List OCDX skills from project .opencode/skills and global ~/.config/opencode/ocdx/skills',
+          'List OCDX skills from project .opencode/ocdx/skills and global ~/.config/opencode/ocdx/skills',
         args: {
           query: tool.schema
             .string()
@@ -243,7 +243,7 @@ ${gitStatus}
             {
               projectRoot,
               skillsDirs: {
-                project: join(projectRoot, '.opencode', 'skills'),
+                project: join(projectRoot, '.opencode', 'ocdx', 'skills'),
                 global: join(getConfigHome(), 'opencode', 'ocdx', 'skills'),
               },
               count: skills.length,
@@ -257,12 +257,12 @@ ${gitStatus}
 
       ocdx_run_skill: tool({
         description:
-          'Run an OCDX skill from project .opencode/skills or global ~/.config/opencode/ocdx/skills',
+          'Run an OCDX skill from project .opencode/ocdx/skills or global ~/.config/opencode/ocdx/skills',
         args: {
           name: tool.schema
             .string()
             .describe(
-              'Skill name (folder name under .opencode/skills or ~/.config/opencode/ocdx/skills)'
+              'Skill name (folder name under .opencode/ocdx/skills or ~/.config/opencode/ocdx/skills)'
             ),
           arguments: tool.schema
             .string()
@@ -271,7 +271,14 @@ ${gitStatus}
         },
         async execute(args, _ctx) {
           const projectRoot = await findProjectRoot(directory);
-          const projectSkillPath = join(projectRoot, '.opencode', 'skills', args.name, 'SKILL.md');
+          const projectSkillPath = join(
+            projectRoot,
+            '.opencode',
+            'ocdx',
+            'skills',
+            args.name,
+            'SKILL.md'
+          );
           const globalSkillPath = join(
             getConfigHome(),
             'opencode',
@@ -1157,15 +1164,15 @@ Raw arguments: "$ARGUMENTS"
 
 Goal:
  - Help the user run one of the OCDX skills located under:
-   - .opencode/skills/<name>/SKILL.md (project)
-   - ~/.config/opencode/ocdx/skills/<name>/SKILL.md (global)
-- You MUST call tools only; do not do any other work.
+     - .opencode/ocdx/skills/<name>/SKILL.md (project)
+     - ~/.config/opencode/ocdx/skills/<name>/SKILL.md (global)
+ - You MUST call tools only; do not do any other work.
 
 Steps:
 1) If $ARGUMENTS is empty: call tool ocdx_list_skills with {}.
 2) If $ARGUMENTS is non-empty: call tool ocdx_list_skills with {"query":"$ARGUMENTS"}.
 3) The tool returns JSON: { count, skills: [{ name, description, model?, path }] }.
-4) If count == 0: explain that skills must be in .opencode/skills/<name>/SKILL.md (project) or ~/.config/opencode/ocdx/skills/<name>/SKILL.md (global) and stop.
+4) If count == 0: explain that skills must be in .opencode/ocdx/skills/<name>/SKILL.md (project) or ~/.config/opencode/ocdx/skills/<name>/SKILL.md (global) and stop.
 5) If count == 1: call tool ocdx_run_skill with {"name": skills[0].name} and stop.
 6) If count > 1:
    - Ask the user to choose using the question tool.
