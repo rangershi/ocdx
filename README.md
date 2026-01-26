@@ -3,7 +3,7 @@
 这是一个可安装的 OpenCode 插件（npm 包名：`ocdx`），提供两个主要 slash 命令：
 
 - `/pr-review-loop`：多模型 PR Review + 自动修复 loop
-- `/ocdx`：从项目内 `.opencode/skills` 选择并按模型分层执行 SKILL.md
+- `/ocdx`：从项目/全局的 OCDX skills 目录选择并执行 SKILL.md
 
 README 分两部分：
 
@@ -102,6 +102,32 @@ PR Review Loop：
   - 项目级：`.opencode/ocdx/skills/<name>/SKILL.md`
   - 全局：`~/.config/opencode/ocdx/skills/<name>/SKILL.md`（或 `XDG_CONFIG_HOME`）
 - `/ocdx <keyword>` 会用关键字过滤技能（name/description）
+
+#### 为什么用 `/ocdx`（与 OpenCode 原生 skills 的区别）
+
+OpenCode 本身有“原生 skills”（由内置 `skill` tool 按需加载），默认搜索路径是：
+
+- `.opencode/skills/<name>/SKILL.md`（项目）
+- `~/.config/opencode/skills/<name>/SKILL.md`（全局）
+- 以及 `.claude/skills/...`（Claude 兼容）
+
+参考：https://opencode.ai/docs/skills
+
+OCDX 的 `/ocdx` 不是替代原生 skills，而是一个“可执行的 skill runner”，核心目标是让 skill 的执行更可控、更可复现：
+
+- 隔离：OCDX skills 放在 `.opencode/ocdx/skills` / `~/.config/opencode/ocdx/skills`，避免污染/冲突原生 `.opencode/skills` 生态。
+- 直接执行：原生 skills 更像“把一段可复用指令加载进当前 agent”；`/ocdx` 会把 SKILL.md 内容拼成 prompt，在独立子会话里跑完并返回输出。
+- 明确选模型：`SKILL.md` frontmatter 支持 `model` 字段（OCDX 扩展，不属于 OpenCode 原生 skills frontmatter 规范）：
+  - `model: high|medium|low`：映射到 `.opencode/ocdx/config.json` 的 `models.*`
+  - `model: provider/model`：直接指定模型
+  - 省略 `model`：默认用 `models.medium`，否则回退到 `reviewerModels[0]`
+- 权限边界：`/ocdx` 固定由 `ocdx-skill-runner` 子代理执行（见 `src/index.ts` 的 agent 配置），便于统一权限策略；原生 skills 则由当前 agent 执行，权限随当前 agent 变化。
+- 传参能力：`/ocdx` 支持附加 arguments（会作为 `## Arguments` 拼到 prompt 里）。
+
+你应该用：
+
+- 原生 skills：当你希望 agent “参考/加载一段指令”，并在当前上下文里自然地继续工作。
+- `/ocdx`：当你希望“执行一个固定流程”（可选指定模型 tier），并把输出当作一个单次任务结果返回。
 
 ### 4) 添加 project skills（可选）
 
