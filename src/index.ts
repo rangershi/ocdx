@@ -172,6 +172,27 @@ export const OcdxPlugin: OpenCodePlugin = async ({ client, directory, $ }) => {
   // Track session state
   const sessions = new Map<string, { createdAt: Date; toolsExecuted: number }>();
 
+  // Preload skill list at startup to avoid /ocdx latency.
+  // Note: This cache is intentionally not refreshed until OpenCode restarts.
+  let skillsCache: { projectRoot: string; allSkills: OcdxSkillSummary[] } | null = null;
+  try {
+    const projectRoot = await findProjectRoot(directory);
+    const allSkills = await listOcdxSkills(projectRoot);
+    skillsCache = { projectRoot, allSkills };
+  } catch (error) {
+    await client.app.log({
+      body: {
+        service: 'ocdx',
+        level: 'warn',
+        message: 'Failed to preload OCDX skills; falling back to runtime scan.',
+        extra: {
+          directory,
+          error: String(error),
+        },
+      },
+    });
+  }
+
   return {
     /**
      * Custom Tools
@@ -224,8 +245,8 @@ ${gitStatus}
         },
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         async execute(args, _ctx) {
-          const projectRoot = await findProjectRoot(directory);
-          const allSkills = await listOcdxSkills(projectRoot);
+          const projectRoot = skillsCache?.projectRoot ?? (await findProjectRoot(directory));
+          const allSkills = skillsCache?.allSkills ?? (await listOcdxSkills(projectRoot));
 
           const query = (args.query || '').trim().toLowerCase();
           const limit = Math.max(1, Math.min(200, args.limit ?? 50));
