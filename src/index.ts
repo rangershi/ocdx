@@ -1179,29 +1179,22 @@ Do not do any other work besides calling the tool.`,
 
       const ocdxSkillCommand = {
         description: 'Run an OCDX SKILL.md from project/global skills directories',
-        template: `You are a command dispatcher for running OCDX skills.
+        agent: 'ocdx-skill-dispatcher',
+        subtask: true,
+        template: (() => {
+          // Pre-render the skill menu so it shows immediately when the command runs.
+          // This avoids showing a long dispatcher prompt while still giving the user instant feedback.
+          const allSkills = skillsCache?.allSkills ?? [];
+          const shown = allSkills.slice(0, 50);
 
-Raw arguments: "$ARGUMENTS"
+          const lines = shown.length
+            ? shown.map((s, idx) => `${idx + 1}. ${s.name} - ${s.description}`)
+            : ['(no skills found)'];
 
-Goal:
- - Help the user run one of the OCDX skills located under:
-     - .opencode/ocdx/skills/<name>/SKILL.md (project)
-     - ~/.config/opencode/ocdx/skills/<name>/SKILL.md (global)
- - You MUST call tools only; do not do any other work.
-
-Steps:
-1) If $ARGUMENTS is empty: call tool ocdx_list_skills with {}.
-2) If $ARGUMENTS is non-empty: call tool ocdx_list_skills with {"query":"$ARGUMENTS"}.
-3) The tool returns JSON: { count, skills: [{ name, description, model?, path }] }.
-4) If count == 0: explain that skills must be in .opencode/ocdx/skills/<name>/SKILL.md (project) or ~/.config/opencode/ocdx/skills/<name>/SKILL.md (global) and stop.
-5) If count == 1: call tool ocdx_run_skill with {"name": skills[0].name} and stop.
-6) If count > 1:
-   - Ask the user to choose using the question tool.
-   - Use numeric labels ("1", "2", ...) to avoid long skill names.
-   - Each option description must include the full skill name and description.
-   - After selection, call tool ocdx_run_skill with the chosen skill name.
-
-Do not do any other work besides calling the tools.`,
+          return [`OCDX skills (${allSkills.length})`, '', ...lines, '', `Args: "$ARGUMENTS"`].join(
+            '\n'
+          );
+        })(),
       };
 
       // Primary short command
@@ -1209,6 +1202,61 @@ Do not do any other work besides calling the tools.`,
 
       // Define agents for PR review workflow (read-only reviewers, editable pr-fix)
       opencodeConfig.agent ??= {};
+
+      opencodeConfig.agent['ocdx-skill-dispatcher'] = {
+        description: 'Internal: dispatch /ocdx to list/run OCDX skills',
+        mode: 'subagent',
+        hidden: true,
+        // Keep tool surface minimal for speed and safety.
+        tools: {
+          // Custom tools
+          ocdx_list_skills: true,
+          ocdx_run_skill: true,
+
+          // UI interaction
+          question: true,
+
+          // Disallow everything else by default
+          bash: false,
+          read: false,
+          grep: false,
+          glob: false,
+          write: false,
+          edit: false,
+          webfetch: false,
+        },
+        prompt: `You are a command dispatcher for running OCDX skills.
+
+Goal:
+- Help the user run one of the OCDX skills located under:
+  - .opencode/ocdx/skills/<name>/SKILL.md (project)
+  - ~/.config/opencode/ocdx/skills/<name>/SKILL.md (global)
+
+Hard rules:
+- You MUST call tools only; do not do any other work.
+- Do not print explanations, reasoning, or the tool plan.
+- Only ask the user to choose when there are multiple matches.
+
+The latest user message contains: Args: "...".
+
+Steps:
+1) Parse the raw arguments string inside Args: "...".
+2) If arguments are empty (or only whitespace): call tool ocdx_list_skills with {}.
+3) If arguments are non-empty: call tool ocdx_list_skills with {"query": "<arguments>"}.
+4) The tool returns JSON: { count, skills: [{ name, description, model?, path }] }.
+5) If count == 0: respond with a short error explaining skills must be in:
+   - .opencode/ocdx/skills/<name>/SKILL.md
+   - ~/.config/opencode/ocdx/skills/<name>/SKILL.md
+   Then stop.
+6) If count == 1: call tool ocdx_run_skill with {"name": skills[0].name} and stop.
+7) If count > 1:
+   - Ask the user to choose using the question tool.
+   - Use numeric labels ("1", "2", ...) to avoid long names.
+   - Each option description must include full skill name and description.
+   - After selection, call tool ocdx_run_skill with the chosen skill name.
+
+Stop as soon as the chosen skill is launched.`,
+      };
 
       opencodeConfig.agent['ocdx-reviewer'] = {
         mode: 'subagent',
