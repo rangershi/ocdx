@@ -8,15 +8,6 @@ import { fileURLToPath } from 'url';
  * Loaded from ~/.config/opencode/ocdx/config.json (preferred)
  */
 export interface OcdxConfig {
-  /** Optional model tiers for different cost/quality tradeoffs */
-  models?: {
-    /** High quality / higher cost model */
-    high?: string;
-    /** Medium tradeoff model */
-    medium?: string;
-    /** Low cost / fast model */
-    low?: string;
-  };
   /** Array of 1-5 reviewer model strings (e.g., "anthropic/claude-3-5-sonnet-20241022") */
   reviewerModels: string[];
   /** Model for analyzing PR comments (non-empty string) */
@@ -53,11 +44,6 @@ export class ConfigError extends Error {
  * Example configuration JSON for error messages
  */
 const EXAMPLE_CONFIG_JSON = `{
-  "models": {
-    "high": "anthropic/claude-3-7-sonnet-20250219",
-    "medium": "anthropic/claude-3-5-sonnet-20241022",
-    "low": "anthropic/claude-3-5-haiku-20241022"
-  },
   "reviewerModels": ["anthropic/claude-3-5-sonnet-20241022"],
   "commentsAnalyzerModel": "anthropic/claude-3-5-sonnet-20241022",
   "prFixModel": "anthropic/claude-3-5-sonnet-20241022",
@@ -289,39 +275,8 @@ export async function loadOcdxConfigStrict(projectRoot?: string): Promise<OcdxCo
     );
   }
 
-  // Validate optional models tiers
-  if ('models' in config && config.models !== undefined) {
-    if (
-      typeof config.models !== 'object' ||
-      config.models === null ||
-      Array.isArray(config.models)
-    ) {
-      throw new ConfigError(
-        'CONFIG_INVALID_SCHEMA',
-        `models must be an object\n\nExpected format:\n${EXAMPLE_CONFIG_JSON}`,
-        configPath,
-        EXAMPLE_CONFIG_JSON
-      );
-    }
-
-    const models = config.models as Record<string, unknown>;
-    for (const key of ['high', 'medium', 'low'] as const) {
-      if (key in models && models[key] !== undefined) {
-        if (typeof models[key] !== 'string' || (models[key] as string).trim() === '') {
-          throw new ConfigError(
-            'CONFIG_INVALID_SCHEMA',
-            `models.${key} must be a non-empty string\n\nExpected format:\n${EXAMPLE_CONFIG_JSON}`,
-            configPath,
-            EXAMPLE_CONFIG_JSON
-          );
-        }
-      }
-    }
-  }
-
   // Return validated config
   return {
-    models: config.models as OcdxConfig['models'],
     reviewerModels: config.reviewerModels as string[],
     commentsAnalyzerModel: config.commentsAnalyzerModel as string,
     prFixModel: config.prFixModel as string,

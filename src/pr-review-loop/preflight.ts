@@ -1,6 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
 import type { PreflightResult } from './types';
 
+import {
+  formatGhAuthHelp,
+  formatGhPermissionHelp,
+  isLikelyGhAuthOrPermissionIssue,
+} from './gh-errors';
+
 /**
  * Run ordered preflight checks before starting the PR review loop.
  *
@@ -33,10 +39,10 @@ export async function runPreflightChecks($: any, directory: string): Promise<Pre
   // Check 1: GitHub CLI authentication
   try {
     await $`gh auth status`.quiet();
-  } catch {
+  } catch (error) {
     return {
       success: false,
-      error: 'gh CLI not authenticated. Run: gh auth login',
+      error: formatGhAuthHelp(error),
     };
   }
 
@@ -105,7 +111,13 @@ export async function runPreflightChecks($: any, directory: string): Promise<Pre
     }
     repoOwner = parts[0];
     repoName = parts[1];
-  } catch {
+  } catch (error) {
+    if (isLikelyGhAuthOrPermissionIssue(error)) {
+      return {
+        success: false,
+        error: formatGhPermissionHelp('读取仓库信息失败（gh repo view）', error),
+      };
+    }
     return {
       success: false,
       error: 'Cannot determine repository owner/name',

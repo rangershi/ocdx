@@ -2,20 +2,24 @@
 import type { Plugin as OpenCodePlugin } from '@opencode-ai/plugin';
 import { tool } from '@opencode-ai/plugin';
 import { loadOcdxConfigStrict, ConfigError } from './config';
+import type { OcdxConfig } from './config';
 import { runPreflightChecks } from './pr-review-loop/preflight';
 import { detectPR } from './pr-review-loop/pr-detection';
 import { parseModelString, extractJsonEnvelope, loadPromptAsset } from './pr-review-loop/utils';
+import {
+  formatGhPermissionHelp,
+  isLikelyGhAuthOrPermissionIssue,
+} from './pr-review-loop/gh-errors';
 import type {
   ReviewerResult,
   CommentsAnalyzerResult,
   Finding,
   FixResult,
+  PRInfo,
 } from './pr-review-loop/types';
-import { access, readFile, readdir, writeFile, unlink } from 'fs/promises';
+import { access, writeFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
-import os from 'os';
-import path from 'path';
 
 /**
  * Resolve asset file paths (works from both src/ in dev mode and dist/ when compiled)
@@ -31,66 +35,6 @@ export function assetUrl(relFromRepoRoot: string): URL {
   const moduleDir = new URL('.', import.meta.url);
   const repoRoot = new URL('..', moduleDir); // parent of src/ or dist/
   return new URL(relFromRepoRoot, repoRoot);
-}
-
-type OcdxSkillSummary = {
-  name: string;
-  description: string;
-  path: string;
-  model?: string;
-  scope: 'project' | 'global';
-};
-
-function getConfigHome(): string {
-  if (process.env.XDG_CONFIG_HOME) return process.env.XDG_CONFIG_HOME;
-
-  if (process.platform === 'win32') {
-    if (process.env.APPDATA) return process.env.APPDATA;
-    return path.join(os.homedir(), 'AppData', 'Roaming');
-  }
-
-  return path.join(os.homedir(), '.config');
-}
-
-function stripQuotes(value: string): string {
-  const trimmed = value.trim();
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-function parseSimpleYamlFrontMatter(markdown: string): {
-  data: Record<string, string>;
-  body: string;
-} {
-  const match = markdown.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
-  if (!match) {
-    return { data: {}, body: markdown };
-  }
-
-  const raw = match[1] ?? '';
-  const data: Record<string, string> = {};
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    if (trimmed.startsWith('-')) continue;
-
-    const kv = trimmed.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
-    if (!kv) continue;
-    const key = kv[1];
-    const value = stripQuotes(kv[2] ?? '');
-    if (!value) continue;
-    data[key] = value;
-  }
-
-  return {
-    data,
-    body: markdown.slice(match[0].length),
-  };
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -112,51 +56,6 @@ async function findProjectRoot(startDir: string): Promise<string> {
   }
 }
 
-async function listSkillsInDir(
-  skillsDir: string,
-  scope: OcdxSkillSummary['scope']
-): Promise<OcdxSkillSummary[]> {
-  if (!(await exists(skillsDir))) return [];
-
-  const entries = await readdir(skillsDir, { withFileTypes: true });
-  const skills: OcdxSkillSummary[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const skillPath = join(skillsDir, entry.name, 'SKILL.md');
-    if (!(await exists(skillPath))) continue;
-
-    const content = await readFile(skillPath, 'utf-8');
-    const { data } = parseSimpleYamlFrontMatter(content);
-    // OpenCode requires frontmatter name to match the directory name; we use the directory name as canonical.
-    const name = entry.name;
-    const description = data.description || '';
-    const model = data.model;
-
-    if (!description) continue;
-    skills.push({ name, description, path: skillPath, model, scope });
-  }
-
-  skills.sort((a, b) => a.name.localeCompare(b.name));
-  return skills;
-}
-
-async function listOcdxSkills(projectRoot: string): Promise<OcdxSkillSummary[]> {
-  const projectSkillsDir = join(projectRoot, '.opencode', 'ocdx', 'skills');
-  const globalSkillsDir = join(getConfigHome(), 'opencode', 'ocdx', 'skills');
-
-  const [globalSkills, projectSkills] = await Promise.all([
-    listSkillsInDir(globalSkillsDir, 'global'),
-    listSkillsInDir(projectSkillsDir, 'project'),
-  ]);
-
-  // Project wins on name collision.
-  const byName = new Map<string, OcdxSkillSummary>();
-  for (const s of globalSkills) byName.set(s.name, s);
-  for (const s of projectSkills) byName.set(s.name, s);
-
-  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
-}
-
 /**
  * Hello World OpenCode Plugin
  *
@@ -172,230 +71,12 @@ export const OcdxPlugin: OpenCodePlugin = async ({ client, directory, $ }) => {
   // Track session state
   const sessions = new Map<string, { createdAt: Date; toolsExecuted: number }>();
 
-  // Preload skill list at startup to avoid /ocdx latency.
-  // Note: This cache is intentionally not refreshed until OpenCode restarts.
-  let skillsCache: { projectRoot: string; allSkills: OcdxSkillSummary[] } | null = null;
-  try {
-    const projectRoot = await findProjectRoot(directory);
-    const allSkills = await listOcdxSkills(projectRoot);
-    skillsCache = { projectRoot, allSkills };
-  } catch (error) {
-    await client.app.log({
-      body: {
-        service: 'ocdx',
-        level: 'warn',
-        message: 'Failed to preload OCDX skills; falling back to runtime scan.',
-        extra: {
-          directory,
-          error: String(error),
-        },
-      },
-    });
-  }
-
   return {
     /**
      * Custom Tools
      */
     tool: {
-      // Tool that executes shell commands
-      check_directory: tool({
-        description: 'Check current directory information',
-        args: {},
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        async execute(_args, _ctx) {
-          try {
-            // Use Bun's shell API
-            const files = await $`ls -la ${directory}`.text();
-            const gitStatus = await $`git status 2>&1 || echo "Not a git repository"`.text();
-
-            return `
-## Directory Information
-
-**Path:** \`${directory}\`
-
-**Files:**
-\`\`\`
-${files}
-\`\`\`
-
-**Git Status:**
-\`\`\`
-${gitStatus}
-\`\`\`
-            `.trim();
-          } catch (error) {
-            return `Error checking directory: ${error}`;
-          }
-        },
-      }),
-
-      ocdx_list_skills: tool({
-        description:
-          'List OCDX skills from project .opencode/ocdx/skills and global ~/.config/opencode/ocdx/skills',
-        args: {
-          query: tool.schema
-            .string()
-            .optional()
-            .describe('Optional substring filter (matches skill name/description)'),
-          limit: tool.schema
-            .number()
-            .optional()
-            .describe('Maximum number of skills to return (default: 50)'),
-        },
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        async execute(args, _ctx) {
-          const projectRoot = skillsCache?.projectRoot ?? (await findProjectRoot(directory));
-          const allSkills = skillsCache?.allSkills ?? (await listOcdxSkills(projectRoot));
-
-          const query = (args.query || '').trim().toLowerCase();
-          const limit = Math.max(1, Math.min(200, args.limit ?? 50));
-
-          const skills = allSkills
-            .filter((s) => {
-              if (!query) return true;
-              return (
-                s.name.toLowerCase().includes(query) || s.description.toLowerCase().includes(query)
-              );
-            })
-            .slice(0, limit);
-
-          return JSON.stringify(
-            {
-              projectRoot,
-              skillsDirs: {
-                project: join(projectRoot, '.opencode', 'ocdx', 'skills'),
-                global: join(getConfigHome(), 'opencode', 'ocdx', 'skills'),
-              },
-              count: skills.length,
-              skills,
-            },
-            null,
-            2
-          );
-        },
-      }),
-
-      ocdx_run_skill: tool({
-        description:
-          'Run an OCDX skill from project .opencode/ocdx/skills or global ~/.config/opencode/ocdx/skills',
-        args: {
-          name: tool.schema
-            .string()
-            .describe(
-              'Skill name (folder name under .opencode/ocdx/skills or ~/.config/opencode/ocdx/skills)'
-            ),
-          arguments: tool.schema
-            .string()
-            .optional()
-            .describe('Optional extra arguments passed to the skill'),
-        },
-        async execute(args, _ctx) {
-          const projectRoot = await findProjectRoot(directory);
-          const projectSkillPath = join(
-            projectRoot,
-            '.opencode',
-            'ocdx',
-            'skills',
-            args.name,
-            'SKILL.md'
-          );
-          const globalSkillPath = join(
-            getConfigHome(),
-            'opencode',
-            'ocdx',
-            'skills',
-            args.name,
-            'SKILL.md'
-          );
-
-          const skillPath = (await exists(projectSkillPath))
-            ? projectSkillPath
-            : (await exists(globalSkillPath))
-              ? globalSkillPath
-              : null;
-
-          if (!skillPath) {
-            return `❌ Skill not found: ${args.name}
-
-Expected paths:
-- ${projectSkillPath}
-- ${globalSkillPath}
-
-Note: skill name maps to <dir>/<name>/SKILL.md.`;
-          }
-
-          const content = await readFile(skillPath, 'utf-8');
-          const { data, body: skillBody } = parseSimpleYamlFrontMatter(content);
-
-          const selectorRaw = (data.model || '').trim();
-          const selector = selectorRaw.toLowerCase();
-
-          let modelString: string | undefined;
-          let config;
-
-          if (selector === 'high' || selector === 'medium' || selector === 'low') {
-            config = await loadOcdxConfigStrict(projectRoot);
-            modelString = config.models?.[selector];
-            if (!modelString) {
-              return `❌ Skill model tier '${selector}' is not configured in .opencode/ocdx/config.json (missing models.${selector}).`;
-            }
-          } else if (selectorRaw.includes('/')) {
-            modelString = selectorRaw;
-          } else {
-            // Default: medium tier if available
-            config = await loadOcdxConfigStrict(projectRoot);
-            modelString = config.models?.medium || config.reviewerModels?.[0];
-          }
-
-          if (!modelString) {
-            return `❌ Unable to resolve model for skill '${args.name}'.
-
-Provide either:
-- model: high|medium|low (and configure models.* in .opencode/ocdx/config.json)
-- model: provider/model`;
-          }
-
-          const { providerID, modelID } = parseModelString(modelString);
-
-          const promptParts = [
-            `You are running the OpenCode skill "${args.name}".`,
-            `Follow the skill instructions.`,
-            '',
-            '## Skill',
-            skillBody.trim(),
-          ];
-
-          const extraArgs = (args.arguments || '').trim();
-          if (extraArgs) {
-            promptParts.push('', '## Arguments', extraArgs);
-          }
-
-          const prompt = promptParts.join('\n');
-
-          const skillSession = await client.session.create({
-            body: { parentID: _ctx.sessionID },
-            query: { directory },
-          });
-
-          const skillResponse = await client.session.prompt({
-            path: { id: skillSession.data!.id },
-            query: { directory },
-            body: {
-              model: { providerID, modelID },
-              agent: 'ocdx-skill-runner',
-              parts: [{ type: 'text', text: prompt }],
-            },
-          });
-
-          return skillResponse
-            .data!.parts.filter((part: any) => part.type === 'text')
-            .map((part: any) => part.text)
-            .join('\n');
-        },
-      }),
-
-      // PR Review Loop orchestrator (PHASE 1: skeleton only)
+      // PR Review Loop orchestrator
       ocdx_pr_review_loop: tool({
         description:
           'Run multi-model PR review loop with auto-fix (orchestrates reviewers, consensus, and fixes)',
@@ -409,7 +90,7 @@ Provide either:
         async execute(args, _ctx) {
           const projectRoot = await findProjectRoot(directory);
           // Step 1: Validate config FIRST (before any PR actions)
-          let config;
+          let config: OcdxConfig;
           try {
             config = await loadOcdxConfigStrict(projectRoot);
           } catch (error) {
@@ -444,7 +125,7 @@ Cannot proceed with PR review loop. Fix the issue above and try again.`;
           }
 
           // Step 3: Detect and gather PR metadata
-          let prInfo;
+          let prInfo: PRInfo;
           try {
             prInfo = await detectPR(
               $,
@@ -549,8 +230,18 @@ ${prInfo.diff}
               });
 
               // Get review threads via GraphQL
-              const reviewThreadsOutput =
-                await $`gh api graphql -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){nodes{isResolved comments(first:50){nodes{id body author{login} authorAssociation path line}}}}}}}' -F owner=${preflightResult.repoOwner!} -F repo=${preflightResult.repoName!} -F pr=${prInfo.number}`.text();
+              let reviewThreadsOutput: string;
+              try {
+                reviewThreadsOutput =
+                  await $`gh api graphql -f query='query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){nodes{isResolved comments(first:50){nodes{id body author{login} authorAssociation path line}}}}}}}' -F owner=${preflightResult.repoOwner!} -F repo=${preflightResult.repoName!} -F pr=${prInfo.number}`.text();
+              } catch (error) {
+                if (isLikelyGhAuthOrPermissionIssue(error)) {
+                  throw new Error(
+                    formatGhPermissionHelp('读取 PR review threads 失败（gh api graphql）', error)
+                  );
+                }
+                throw error;
+              }
               const reviewThreadsData = JSON.parse(reviewThreadsOutput);
 
               // Construct analyzer context
@@ -732,7 +423,16 @@ ${
 
             try {
               await writeFile(tempFile, reviewReport, 'utf-8');
-              await $`gh pr comment ${prInfo.number} --body-file ${tempFile}`.quiet();
+              try {
+                await $`gh pr comment ${prInfo.number} --body-file ${tempFile}`.quiet();
+              } catch (error) {
+                if (isLikelyGhAuthOrPermissionIssue(error)) {
+                  throw new Error(
+                    formatGhPermissionHelp(`发表评论失败（gh pr comment #${prInfo.number}）`, error)
+                  );
+                }
+                throw error;
+              }
             } finally {
               try {
                 await unlink(tempFile);
@@ -973,7 +673,19 @@ ${fixResult.commits.map((c) => `  - ${c.sha.substring(0, 7)}: ${c.message}`).joi
 
               try {
                 await writeFile(tempFileFailed, fixReportFailed, 'utf-8');
-                await $`gh pr comment ${prInfo.number} --body-file ${tempFileFailed}`.quiet();
+                try {
+                  await $`gh pr comment ${prInfo.number} --body-file ${tempFileFailed}`.quiet();
+                } catch (error) {
+                  if (isLikelyGhAuthOrPermissionIssue(error)) {
+                    throw new Error(
+                      formatGhPermissionHelp(
+                        `发表评论失败（gh pr comment #${prInfo.number}）`,
+                        error
+                      )
+                    );
+                  }
+                  throw error;
+                }
               } finally {
                 try {
                   await unlink(tempFileFailed);
@@ -1054,7 +766,16 @@ ${
 
             try {
               await writeFile(tempFileSuccess, fixReport, 'utf-8');
-              await $`gh pr comment ${prInfo.number} --body-file ${tempFileSuccess}`.quiet();
+              try {
+                await $`gh pr comment ${prInfo.number} --body-file ${tempFileSuccess}`.quiet();
+              } catch (error) {
+                if (isLikelyGhAuthOrPermissionIssue(error)) {
+                  throw new Error(
+                    formatGhPermissionHelp(`发表评论失败（gh pr comment #${prInfo.number}）`, error)
+                  );
+                }
+                throw error;
+              }
             } finally {
               try {
                 await unlink(tempFileSuccess);
@@ -1177,86 +898,8 @@ Usage:
 Do not do any other work besides calling the tool.`,
       };
 
-      const ocdxSkillCommand = {
-        description: 'Run an OCDX SKILL.md from project/global skills directories',
-        agent: 'ocdx-skill-dispatcher',
-        subtask: true,
-        template: (() => {
-          // Pre-render the skill menu so it shows immediately when the command runs.
-          // This avoids showing a long dispatcher prompt while still giving the user instant feedback.
-          const allSkills = skillsCache?.allSkills ?? [];
-          const shown = allSkills.slice(0, 50);
-
-          const lines = shown.length
-            ? shown.map((s, idx) => `${idx + 1}. ${s.name} - ${s.description}`)
-            : ['(no skills found)'];
-
-          return [`OCDX skills (${allSkills.length})`, '', ...lines, '', `Args: "$ARGUMENTS"`].join(
-            '\n'
-          );
-        })(),
-      };
-
-      // Primary short command
-      opencodeConfig.command['ocdx'] = ocdxSkillCommand;
-
       // Define agents for PR review workflow (read-only reviewers, editable pr-fix)
       opencodeConfig.agent ??= {};
-
-      opencodeConfig.agent['ocdx-skill-dispatcher'] = {
-        description: 'Internal: dispatch /ocdx to list/run OCDX skills',
-        mode: 'subagent',
-        hidden: true,
-        // Keep tool surface minimal for speed and safety.
-        tools: {
-          // Custom tools
-          ocdx_list_skills: true,
-          ocdx_run_skill: true,
-
-          // UI interaction
-          question: true,
-
-          // Disallow everything else by default
-          bash: false,
-          read: false,
-          grep: false,
-          glob: false,
-          write: false,
-          edit: false,
-          webfetch: false,
-        },
-        prompt: `You are a command dispatcher for running OCDX skills.
-
-Goal:
-- Help the user run one of the OCDX skills located under:
-  - .opencode/ocdx/skills/<name>/SKILL.md (project)
-  - ~/.config/opencode/ocdx/skills/<name>/SKILL.md (global)
-
-Hard rules:
-- You MUST call tools only; do not do any other work.
-- Do not print explanations, reasoning, or the tool plan.
-- Only ask the user to choose when there are multiple matches.
-
-The latest user message contains: Args: "...".
-
-Steps:
-1) Parse the raw arguments string inside Args: "...".
-2) If arguments are empty (or only whitespace): call tool ocdx_list_skills with {}.
-3) If arguments are non-empty: call tool ocdx_list_skills with {"query": "<arguments>"}.
-4) The tool returns JSON: { count, skills: [{ name, description, model?, path }] }.
-5) If count == 0: respond with a short error explaining skills must be in:
-   - .opencode/ocdx/skills/<name>/SKILL.md
-   - ~/.config/opencode/ocdx/skills/<name>/SKILL.md
-   Then stop.
-6) If count == 1: call tool ocdx_run_skill with {"name": skills[0].name} and stop.
-7) If count > 1:
-   - Ask the user to choose using the question tool.
-   - Use numeric labels ("1", "2", ...) to avoid long names.
-   - Each option description must include full skill name and description.
-   - After selection, call tool ocdx_run_skill with the chosen skill name.
-
-Stop as soon as the chosen skill is launched.`,
-      };
 
       opencodeConfig.agent['ocdx-reviewer'] = {
         mode: 'subagent',
@@ -1284,25 +927,6 @@ Stop as soon as the chosen skill is launched.`,
       };
 
       opencodeConfig.agent['ocdx-pr-fix'] = {
-        mode: 'subagent',
-        tools: {
-          bash: true,
-          read: true,
-          grep: true,
-          glob: true,
-          edit: true,
-        },
-        permission: {
-          edit: 'allow',
-          bash: {
-            deny: ['git push --force*', 'git push -f*'],
-            allow: ['dx *', 'git status*', 'git diff*', 'git add*', 'git commit*'],
-            ask: ['git push*'],
-          },
-        },
-      } as any;
-
-      opencodeConfig.agent['ocdx-skill-runner'] = {
         mode: 'subagent',
         tools: {
           bash: true,

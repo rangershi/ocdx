@@ -1,6 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { PRInfo } from './types';
 
+import {
+  describeUnknownError,
+  formatGhPermissionHelp,
+  isLikelyGhAuthOrPermissionIssue,
+} from './gh-errors';
+
 /**
  * Detect and gather full metadata for a Pull Request
  *
@@ -66,7 +72,12 @@ export async function detectPR(
       if (error instanceof Error && error.message.startsWith('Multiple PRs found')) {
         throw error;
       }
-      throw new Error(`Failed to list PRs for branch ${currentBranch}: ${error}`);
+      if (isLikelyGhAuthOrPermissionIssue(error)) {
+        throw new Error(formatGhPermissionHelp(`列出分支 PR 失败（${currentBranch}）`, error));
+      }
+      throw new Error(
+        `Failed to list PRs for branch ${currentBranch}: ${describeUnknownError(error)}`
+      );
     }
   }
 
@@ -82,7 +93,10 @@ export async function detectPR(
     if (error instanceof Error && error.message.includes('Cannot review')) {
       throw error;
     }
-    throw new Error(`Failed to get PR state for #${prNumber}: ${error}`);
+    if (isLikelyGhAuthOrPermissionIssue(error)) {
+      throw new Error(formatGhPermissionHelp(`读取 PR 状态失败（#${prNumber}）`, error));
+    }
+    throw new Error(`Failed to get PR state for #${prNumber}: ${describeUnknownError(error)}`);
   }
 
   // Step 3: Check branch match (only if auto-detected)
@@ -101,7 +115,12 @@ export async function detectPR(
       if (error instanceof Error && error.message.includes('does not match')) {
         throw error;
       }
-      throw new Error(`Failed to verify branch match for PR #${prNumber}: ${error}`);
+      if (isLikelyGhAuthOrPermissionIssue(error)) {
+        throw new Error(formatGhPermissionHelp(`校验 PR 分支失败（#${prNumber}）`, error));
+      }
+      throw new Error(
+        `Failed to verify branch match for PR #${prNumber}: ${describeUnknownError(error)}`
+      );
     }
   }
 
@@ -122,7 +141,10 @@ export async function detectPR(
     headRefName = metadata.headRefName;
     state = metadata.state;
   } catch (error) {
-    throw new Error(`Failed to parse PR metadata for #${prNumber}: ${error}`);
+    if (isLikelyGhAuthOrPermissionIssue(error)) {
+      throw new Error(formatGhPermissionHelp(`读取 PR 元数据失败（#${prNumber}）`, error));
+    }
+    throw new Error(`Failed to parse PR metadata for #${prNumber}: ${describeUnknownError(error)}`);
   }
 
   // Step 5: Get file list
@@ -136,7 +158,10 @@ export async function detectPR(
 
     files = filePaths.map((path: string) => ({ path }));
   } catch (error) {
-    throw new Error(`Failed to get file list for PR #${prNumber}: ${error}`);
+    if (isLikelyGhAuthOrPermissionIssue(error)) {
+      throw new Error(formatGhPermissionHelp(`读取 PR 文件列表失败（#${prNumber}）`, error));
+    }
+    throw new Error(`Failed to get file list for PR #${prNumber}: ${describeUnknownError(error)}`);
   }
 
   // Step 6: Get diff (with truncation)
@@ -152,7 +177,10 @@ export async function detectPR(
       diff = lines.slice(0, 4000).join('\n') + '\n[TRUNCATED_DIFF]';
     }
   } catch (error) {
-    throw new Error(`Failed to get diff for PR #${prNumber}: ${error}`);
+    if (isLikelyGhAuthOrPermissionIssue(error)) {
+      throw new Error(formatGhPermissionHelp(`读取 PR diff 失败（#${prNumber}）`, error));
+    }
+    throw new Error(`Failed to get diff for PR #${prNumber}: ${describeUnknownError(error)}`);
   }
 
   // Step 7: Detect fork / push permission (GraphQL)
@@ -173,8 +201,13 @@ export async function detectPR(
     ) {
       canPush = true;
     }
-  } catch {
-    // GraphQL errors should not throw - set safe default
+  } catch (error) {
+    // If this is an auth/permission issue, surface actionable guidance.
+    if (isLikelyGhAuthOrPermissionIssue(error)) {
+      throw new Error(formatGhPermissionHelp('检查 push 权限失败（gh api graphql）', error));
+    }
+
+    // Otherwise, treat as best-effort and fall back to safe default.
     canPush = false;
   }
 
@@ -211,7 +244,11 @@ export async function detectPR(
         continue;
       }
     }
-  } catch {
+  } catch (error) {
+    if (isLikelyGhAuthOrPermissionIssue(error)) {
+      throw new Error(formatGhPermissionHelp(`读取 PR reviews 失败（#${prNumber}）`, error));
+    }
+
     // Review fetch errors should not throw - use safe defaults
     hasChangesRequested = false;
   }

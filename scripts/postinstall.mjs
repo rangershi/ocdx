@@ -59,7 +59,6 @@ async function main() {
 
   // Ensure stable directories exist even if @asset has no files for them.
   await mkdir(join(userOcdxDir, 'prompt'), { recursive: true });
-  await mkdir(join(userOcdxDir, 'skills'), { recursive: true });
 
   if (!(await pathExists(srcAssetsDir))) {
     return;
